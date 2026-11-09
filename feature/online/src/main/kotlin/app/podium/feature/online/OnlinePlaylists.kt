@@ -31,8 +31,9 @@ import kotlinx.coroutines.launch
  * source can hold them they live on the device; every one belongs to its online source.
  */
 @Composable
-fun OnlinePlaylistsScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Unit) {
+fun OnlinePlaylistsScreen(repository: OnlineRepository, actions: OnlineActions, navigate: (OnlinePlace) -> Unit) {
     val playlists by repository.playlists.collectAsStateWithLifecycle(initialValue = null)
+    val overlayHost = overlay()
     val list = playlists ?: return
     val entries = listOf(
         OnlineEntry("New playlist", MenuPreview.None, leading = PodiumSymbol.Queue, chevron = true) {
@@ -44,13 +45,31 @@ fun OnlinePlaylistsScreen(repository: OnlineRepository, navigate: (OnlinePlace) 
             navigate(OnlinePlace.MyPlaylist(p.id, p.name))
         }
     }
-    OnlinePaperMenu(entries, "online-playlists")
+    OnlinePaperMenu(
+        entries = entries,
+        stateKey = "online-playlists",
+        onLongPress = { idx ->
+            val p = list.getOrNull(idx - 1) ?: return@OnlinePaperMenu
+            overlayHost.show(
+                MenuSpec(
+                    p.name,
+                    listOf(
+                        MenuAction("Download playlist") { actions.downloadMyPlaylist(p.id) },
+                        MenuAction("Open playlist") { navigate(OnlinePlace.MyPlaylist(p.id, p.name)) },
+                        MenuAction("Rename") { navigate(OnlinePlace.NamePlaylist(p.id, p.name)) },
+                        MenuAction("Delete playlist") { repository.deletePlaylist(p.id) },
+                    ),
+                ),
+            )
+        },
+    )
 }
 
 private sealed interface MineRow {
     data object Header : MineRow
     data object Play : MineRow
     data object Shuffle : MineRow
+    data object DownloadAll : MineRow
     data object Rename : MineRow
     data object Delete : MineRow
     data class Entry(val entry: OnlinePlaylistEntry, val index: Int) : MineRow
@@ -72,6 +91,7 @@ fun OnlineMyPlaylistScreen(place: OnlinePlace.MyPlaylist, repository: OnlineRepo
             if (playable.isNotEmpty()) {
                 add(MineRow.Play)
                 add(MineRow.Shuffle)
+                add(MineRow.DownloadAll)
             }
             add(MineRow.Rename)
             add(MineRow.Delete)
@@ -84,6 +104,7 @@ fun OnlineMyPlaylistScreen(place: OnlinePlace.MyPlaylist, repository: OnlineRepo
         when (val row = rows.getOrNull(i)) {
             MineRow.Play -> actions.play(playable, 0, name)
             MineRow.Shuffle -> actions.shuffle(playable, name)
+            MineRow.DownloadAll -> actions.downloadAll(playable)
             MineRow.Rename -> navigate(OnlinePlace.NamePlaylist(place.id, name))
             MineRow.Delete -> overlayHost.show(
                 MenuSpec("Delete “$name”?", listOf(MenuAction("Delete playlist") { repository.deletePlaylist(place.id) }, MenuAction("Keep it") {})),
@@ -95,10 +116,18 @@ fun OnlineMyPlaylistScreen(place: OnlinePlace.MyPlaylist, repository: OnlineRepo
     val longPress: (Int) -> Unit = { i ->
         (rows.getOrNull(i) as? MineRow.Entry)?.let { row ->
             val track = row.entry.track
+            val playableTrack = track.availability !is Availability.Unavailable
             overlayHost.show(
                 MenuSpec(
                     track.title,
                     buildList {
+                        if (actions.isDownloaded(track.id)) {
+                            add(MenuAction("Remove download") { actions.removeDownload(track.id) })
+                        } else if (actions.isDownloading(track.id)) {
+                            add(MenuAction("Cancel download") { actions.removeDownload(track.id) })
+                        } else if (playableTrack && track.queuesHere && track.kind != app.podium.core.model.MediaKind.LIVE) {
+                            add(MenuAction("Download") { actions.download(track) })
+                        }
                         if (row.index > 0) add(MenuAction("Move up") { repository.movePlaylistEntry(place.id, row.entry.entryId, row.index - 1) })
                         if (row.index < entries.lastIndex) add(MenuAction("Move down") { repository.movePlaylistEntry(place.id, row.entry.entryId, row.index + 1) })
                         add(MenuAction("Remove from playlist") { repository.removeFromPlaylist(place.id, row.entry.entryId) })
@@ -118,6 +147,7 @@ fun OnlineMyPlaylistScreen(place: OnlinePlace.MyPlaylist, repository: OnlineRepo
                 MineRow.Header -> "header"
                 MineRow.Play -> "play"
                 MineRow.Shuffle -> "shuffle"
+                MineRow.DownloadAll -> "download-all"
                 MineRow.Rename -> "rename"
                 MineRow.Delete -> "delete"
                 is MineRow.Entry -> "entry:${it.entry.entryId}"
@@ -144,6 +174,7 @@ fun OnlineMyPlaylistScreen(place: OnlinePlace.MyPlaylist, repository: OnlineRepo
             )
             MineRow.Play -> MenuRow("Play", focused, leading = PodiumSymbol.Play, showChevron = false)
             MineRow.Shuffle -> MenuRow("Shuffle", focused, leading = PodiumSymbol.Shuffle, showChevron = false)
+            MineRow.DownloadAll -> MenuRow("Download all", focused, leading = PodiumSymbol.Queue, showChevron = false)
             MineRow.Rename -> MenuRow("Rename", focused, showChevron = true)
             MineRow.Delete -> MenuRow("Delete playlist", focused, showChevron = false)
             is MineRow.Entry -> OnlineTrackRow(row.entry.track, focused)

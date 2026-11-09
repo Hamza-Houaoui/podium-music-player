@@ -127,4 +127,51 @@ class SignedInWalkTest {
     fun `the session never shows up in a log line`() {
         assertEquals("StreamSession", session.toString())
     }
+
+    @Test
+    fun `signed in, 256 kbps Premium streams (774 or 141) win over unsigned 160 kbps, and pause after 3 misses`() = runTest {
+        val premiumScript = object : StreamHttp {
+            var givePremium = true
+            val asked = mutableListOf<String>()
+            override suspend fun post(url: String, headers: Map<String, String>, body: ByteArray): HttpResponse {
+                if (url == YouTubeStreamWalker.VISITOR_URL) return HttpResponse(200, """{"responseContext":{"visitorData":"guest"}}""".toByteArray())
+                val app = Json.parseToJsonElement(body).jsonObject["context"]!!.jsonObject["client"]!!.jsonObject["clientName"]!!.jsonPrimitive.content
+                asked += app
+                val formats = if (app == "WEB_REMIX" && givePremium) {
+                    """{"itag":141,"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","bitrate":256000,"signatureCipher":"s=SIG&url=https%3A%2F%2Frr1.googlevideo.com%2Fvideoplayback%3Fc%3DWEB_REMIX%26n%3Dabc"},
+                       {"itag":251,"mimeType":"audio/webm; codecs=\"opus\"","bitrate":135000,"signatureCipher":"s=SIG&url=https%3A%2F%2Frr1.googlevideo.com%2Fvideoplayback%3Fc%3DWEB_REMIX%26n%3Dabc"}"""
+                } else if (app == "WEB_REMIX") {
+                    """{"itag":251,"mimeType":"audio/webm; codecs=\"opus\"","bitrate":135000,"signatureCipher":"s=SIG&url=https%3A%2F%2Frr1.googlevideo.com%2Fvideoplayback%3Fc%3DWEB_REMIX%26n%3Dabc"}"""
+                } else {
+                    """{"itag":251,"mimeType":"audio/webm; codecs=\"opus\"","bitrate":135000,"url":"https://rr1.googlevideo.com/videoplayback?c=$app"}"""
+                }
+                return HttpResponse(200, """{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"vid00000001"},"streamingData":{"adaptiveFormats":[$formats]}}""".toByteArray())
+            }
+            override suspend fun get(url: String, headers: Map<String, String>, maxBytes: Int): HttpResponse = when (url) {
+                PlayerScripts.IFRAME_API -> HttpResponse(200, """player\/cbcfbf2f\/www-widgetapi""".toByteArray())
+                else -> HttpResponse(200, "x={signatureTimestamp:20746}".toByteArray())
+            }
+            override suspend fun probe(url: String, headers: Map<String, String>, range: String): Int = 206
+        }
+        val cache = DirectoryPlayerScriptCache(Files.createTempDirectory("podium-premium").toFile())
+        val w = YouTubeStreamWalker(
+            premiumScript, region = { "US" }, now = { 1_000L },
+            identities = listOf(PlayerIdentities.VISIONOS, PlayerIdentities.WEB_REMIX_SIGNED_IN),
+            scripts = PlayerScripts(premiumScript, EjsChallengeSolver(Solver(), cache), cache) { 1_000L },
+            session = { session },
+        )
+        val first = assertIs<YouTubeStreamWalker.Result.Found>(w.walk(video)).stream
+        assertEquals(141, first.itag)
+        assertEquals(256, first.bitrateKbps)
+        assertEquals("WEB_REMIX_SIGNED_IN", first.identity)
+
+        // When the account isn't Premium, 3 misses pause the pre-check so VISIONOS goes straight away.
+        premiumScript.givePremium = false
+        repeat(3) {
+            assertEquals("VISIONOS", assertIs<YouTubeStreamWalker.Result.Found>(w.walk(video)).stream.identity)
+        }
+        premiumScript.asked.clear()
+        assertEquals("VISIONOS", assertIs<YouTubeStreamWalker.Result.Found>(w.walk(video)).stream.identity)
+        assertEquals(listOf("VISIONOS"), premiumScript.asked, "Premium pre-check is paused after 3 non-Premium songs")
+    }
 }

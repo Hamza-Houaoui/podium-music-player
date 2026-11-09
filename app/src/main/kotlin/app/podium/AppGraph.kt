@@ -73,7 +73,15 @@ class AppGraph(val context: Context) {
      * for an EXACT copy of an online song; the song's own source is the fallback. Never in the registry.
      */
     val customSources = CustomSources(credentials, health, appScope, clock::nowMillis)
-    val resolver = StreamResolver(registry, health, matcher, clock, equivalence = equivalence, preferred = customSources)
+    val resolver = StreamResolver(
+        registry,
+        health,
+        matcher,
+        clock,
+        ownedCopies = listOf(app.podium.sources.api.resolve.OwnedCopyLocator { track -> downloads.find(track) }),
+        equivalence = equivalence,
+        preferred = customSources,
+    )
 
     val libraryStore = LibraryStore(database)
     val catalog = TrackCatalog(registry) { id -> libraryStore.track(id) }
@@ -81,9 +89,11 @@ class AppGraph(val context: Context) {
     /** A song with its album's and artists' pages, looked up on its source when a list left them out (D-79, D-80). */
     val songPages = SongPages(catalog, registry, appScope)
     val queueStore = DatabaseQueueStore(database)
-    val artwork = ArtworkResolver(registry)
+    val artwork = ArtworkResolver(registry) { ref -> downloads.loadArtwork(ref) }
 
     val localSource = LocalMusicSource(context, appScope)
+    val radioRepository = app.podium.radio.RadioRepository(context)
+    val radioSource = app.podium.radio.RadioMusicSource(radioRepository, java.io.File(context.cacheDir, "radio-icons"))
 
     /** Which sources are on (D-35): stored, applied once every source is registered. */
     val sourceSettings = SourceSettings(registry, SharedPrefsSourcePreferences(context))
@@ -142,6 +152,7 @@ class AppGraph(val context: Context) {
         installDebugDiagnostics()
         registry.register(localSource)
         registry.register(youtubeMusic)
+        registry.register(radioSource)
         buildVariantSources(context).forEach { registry.register(it) }
         sourceSettings.apply()
         RetiredSources.cleanUp(context, credentials)
@@ -261,8 +272,21 @@ class AppGraph(val context: Context) {
 
     val lyricsGateway = object : app.podium.feature.nowplaying.LyricsGateway {
         override val attribution get() = lyrics.attribution
-        override suspend fun lyrics(request: app.podium.core.lyrics.LyricsRequest) =
-            debugLyrics.value?.invoke(request) ?: this@AppGraph.lyrics.lyrics(request)
+        override suspend fun lyrics(request: app.podium.core.lyrics.LyricsRequest): app.podium.core.lyrics.LyricsResult {
+            debugLyrics.value?.invoke(request)?.let { return it }
+            localSource.getCustomLyrics(request.key)?.takeIf { it.isNotBlank() }?.let { raw ->
+                val parsed = app.podium.core.lyrics.LrcParser.synced(raw)
+                    ?: app.podium.core.lyrics.LrcParser.plain(raw)
+                if (parsed != null) {
+                    val formatted = app.podium.core.lyrics.LyricsFormatter.forPlayback(parsed, request.durationMs)
+                    return app.podium.core.lyrics.LyricsResult.Found(
+                        formatted,
+                        app.podium.core.lyrics.LyricsAttribution("Edited on this device", ""),
+                    )
+                }
+            }
+            return this@AppGraph.lyrics.lyrics(request)
+        }
         override fun allow() = deviceSettings.setOnlineLyrics(true)
     }
 
@@ -307,6 +331,17 @@ class AppGraph(val context: Context) {
     /** Whether the hands-on guide was finished or skipped (D-57). */
     val guide by lazy { app.podium.guide.GuideStore(context) }
 
+    /** Listen Together: local-network synchronized listening with nearby Podium and Prism devices. */
+    val together by lazy { app.podium.together.TogetherSession(context, this) }
+
+    /** Offline downloads: audio, artwork, lyrics, and Smart Downloads. */
+    val downloads by lazy { app.podium.downloads.OfflineDownloadManager(context, this) }
+
+    init {
+        // Warm offline download index so downloaded tracks are in catalog immediately on launch.
+        downloads
+    }
+
     /** Debug builds: make a sticker from this picture (device tests, without the photo picker). */
     val debugStickerSource = MutableStateFlow<android.net.Uri?>(null)
 
@@ -324,6 +359,7 @@ class AppGraph(val context: Context) {
      * player's place saved as it pauses); the caller then closes the app.
      */
     fun prepareToTurnOff() {
+        together.stop()
         playbackController.pause()
         stickers.flush()
         localPlayback.release()

@@ -20,11 +20,16 @@ import androidx.core.content.ContextCompat
 import app.podium.core.common.Outcome
 import app.podium.core.common.PodiumError
 import app.podium.core.model.AlbumId
+import app.podium.core.model.AlbumRef
+import app.podium.core.model.ArtistCredit
 import app.podium.core.model.ArtistId
 import app.podium.core.model.ArtworkRef
 import app.podium.core.model.PlaybackRoute
 import app.podium.core.model.SourceRef
 import app.podium.core.model.Track
+import app.podium.core.model.TrackId
+import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import app.podium.sources.api.AlbumDetail
 import app.podium.sources.api.AlbumSummary
 import app.podium.sources.api.ArtistDetail
@@ -70,6 +75,13 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+data class LocalTrackEdit(
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val lyrics: String? = null,
+)
+
 /**
  * Music files on this device, through Android's media library (MediaStore).
  *
@@ -98,6 +110,9 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
 
     /** Which folders are read (D-32), kept with the source's own settings. */
     private val prefs = appContext.getSharedPreferences("local_source", Context.MODE_PRIVATE)
+    private val edits = ConcurrentHashMap<String, LocalTrackEdit>()
+    @Volatile
+    private var lastRows: List<MediaStoreRow> = emptyList()
     private val _selection = MutableStateFlow(loadSelection())
     private val _folders = MutableStateFlow<List<MusicFolder>?>(null)
 
@@ -111,7 +126,187 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
     }
 
     init {
+        loadEdits()
         resolver.registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, observer)
+    }
+
+    private fun keyFor(trackId: TrackId): String =
+        trackId.value.removePrefix("${LocalTrackMapper.SOURCE_ID.value}:")
+
+    private fun loadEdits() {
+        val raw = prefs.getString(KEY_TRACK_EDITS, null) ?: return
+        runCatching {
+            val root = JSONObject(raw)
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val obj = root.optJSONObject(k) ?: continue
+                edits[k] = LocalTrackEdit(
+                    title = obj.optString("title").takeIf { it.isNotBlank() },
+                    artist = obj.optString("artist").takeIf { it.isNotBlank() },
+                    album = if (obj.has("album")) obj.optString("album") else null,
+                    lyrics = obj.optString("lyrics").takeIf { it.isNotBlank() },
+                )
+            }
+        }
+    }
+
+    private fun persistEdits() {
+        runCatching {
+            val root = JSONObject()
+            for ((k, v) in edits) {
+                val obj = JSONObject()
+                v.title?.let { obj.put("title", it) }
+                v.artist?.let { obj.put("artist", it) }
+                v.album?.let { obj.put("album", it) }
+                v.lyrics?.let { obj.put("lyrics", it) }
+                root.put(k, obj)
+            }
+            prefs.edit().putString(KEY_TRACK_EDITS, root.toString()).apply()
+        }
+    }
+
+    fun getEdit(trackId: TrackId): LocalTrackEdit? = edits[keyFor(trackId)] ?: edits[trackId.value]
+
+    fun getCustomLyrics(trackIdOrKey: String): String? {
+        val clean = trackIdOrKey.removePrefix("${LocalTrackMapper.SOURCE_ID.value}:")
+        return (edits[clean] ?: edits[trackIdOrKey])?.lyrics
+    }
+
+    fun hasEdit(trackId: TrackId): Boolean = getEdit(trackId) != null
+
+    fun saveEdit(
+        trackId: TrackId,
+        title: String,
+        artist: String,
+        album: String,
+        lyrics: String?,
+    ): Track? {
+        val key = keyFor(trackId)
+        val edit = LocalTrackEdit(
+            title = title.trim().takeIf { it.isNotEmpty() },
+            artist = artist.trim().takeIf { it.isNotEmpty() },
+            album = album.trim(),
+            lyrics = lyrics?.trim()?.takeIf { it.isNotEmpty() },
+        )
+        edits[key] = edit
+        persistEdits()
+        rebuildTracksFromEdits()
+        return _tracks.value?.firstOrNull { it.id == trackId }
+    }
+
+    fun clearEdit(trackId: TrackId): Track? {
+        val key = keyFor(trackId)
+        edits.remove(key)
+        edits.remove(trackId.value)
+        persistEdits()
+        rebuildTracksFromEdits()
+        return _tracks.value?.firstOrNull { it.id == trackId }
+    }
+
+    fun renameAlbum(albumId: AlbumId, newTitle: String, newArtist: String? = null) {
+        val cleanTitle = newTitle.trim()
+        if (cleanTitle.isEmpty()) return
+        val cleanArtist = newArtist?.trim()?.takeIf { it.isNotEmpty() }
+        val matching = _tracks.value.orEmpty().filter { it.album?.id == albumId }
+        if (matching.isEmpty()) return
+        for (track in matching) {
+            val key = keyFor(track.id)
+            val prev = edits[key] ?: LocalTrackEdit()
+            edits[key] = prev.copy(
+                album = cleanTitle,
+                artist = cleanArtist ?: prev.artist,
+            )
+        }
+        persistEdits()
+        rebuildTracksFromEdits()
+    }
+
+    fun renameArtist(artistId: ArtistId, newName: String) {
+        val cleanName = newName.trim()
+        if (cleanName.isEmpty()) return
+        val matching = _tracks.value.orEmpty().filter {
+            it.artists.firstOrNull()?.id == artistId ||
+                ArtistId.of(descriptor.id, it.artistDisplay.trim().lowercase()) == artistId
+        }
+        if (matching.isEmpty()) return
+        for (track in matching) {
+            val key = keyFor(track.id)
+            val prev = edits[key] ?: LocalTrackEdit()
+            edits[key] = prev.copy(artist = cleanName)
+        }
+        persistEdits()
+        rebuildTracksFromEdits()
+    }
+
+    private fun rebuildTracksFromEdits() {
+        val rows = lastRows
+        if (rows.isNotEmpty()) {
+            val selection = _selection.value
+            val baseTracks = rows.filter { selection.includes(it.relativePath.orEmpty()) }.map(LocalTrackMapper::toTrack)
+            _tracks.value = applyEdits(baseTracks)
+        } else {
+            val current = _tracks.value
+            if (current != null) {
+                _tracks.value = applyEdits(current)
+            } else {
+                refresh()
+            }
+        }
+    }
+
+    private fun applyEdits(baseTracks: List<Track>): List<Track> {
+        if (edits.isEmpty()) return baseTracks
+        val existingArtistsByName = HashMap<String, ArtistId>()
+        val existingAlbumsByTitle = HashMap<String, AlbumId>()
+        for (t in baseTracks) {
+            val aId = t.artists.firstOrNull()?.id
+            if (aId != null) existingArtistsByName.putIfAbsent(t.artistDisplay.trim().lowercase(), aId)
+            val alb = t.album
+            if (alb?.id != null && alb.title.isNotBlank()) {
+                existingAlbumsByTitle.putIfAbsent(alb.title.trim().lowercase(), alb.id!!)
+            }
+        }
+        return baseTracks.map { track ->
+            val key = keyFor(track.id)
+            val edit = edits[key] ?: edits[track.id.value] ?: return@map track
+            val newTitle = edit.title?.takeIf { it.isNotBlank() } ?: track.title
+            val newArtist = edit.artist?.takeIf { it.isNotBlank() } ?: track.artistDisplay
+            val artistChanged = !newArtist.equals(track.artistDisplay, ignoreCase = true)
+            val resolvedArtistId = if (!artistChanged) {
+                track.artists.firstOrNull()?.id ?: ArtistId.of(LocalTrackMapper.SOURCE_ID, newArtist.lowercase())
+            } else {
+                existingArtistsByName[newArtist.lowercase()]
+                    ?: ArtistId.of(LocalTrackMapper.SOURCE_ID, "custom:" + newArtist.lowercase())
+            }
+            val newAlbumRef = when {
+                edit.album == null -> track.album?.let { alb ->
+                    if (artistChanged) alb.copy(albumArtist = newArtist) else alb
+                }
+                edit.album.isBlank() -> null
+                track.album != null && edit.album.equals(track.album?.title, ignoreCase = true) -> {
+                    track.album!!.copy(
+                        title = edit.album,
+                        albumArtist = if (artistChanged) newArtist else track.album?.albumArtist,
+                    )
+                }
+                else -> {
+                    val resolvedAlbumId = existingAlbumsByTitle[edit.album.lowercase()]
+                        ?: AlbumId.of(LocalTrackMapper.SOURCE_ID, "custom:" + edit.album.lowercase())
+                    AlbumRef(
+                        title = edit.album,
+                        id = resolvedAlbumId,
+                        albumArtist = newArtist,
+                    )
+                }
+            }
+            track.copy(
+                title = newTitle,
+                artists = listOf(ArtistCredit(newArtist, id = resolvedArtistId)),
+                artistDisplay = newArtist,
+                album = newAlbumRef,
+            )
+        }.sortedBy { it.title.lowercase() }
     }
 
     fun hasPermission(): Boolean =
@@ -204,8 +399,10 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
         _folders.value = rows.groupingBy { FolderSelection.normalize(it.relativePath.orEmpty()) }.eachCount()
             .map { (path, count) -> MusicFolder(path, count) }
             .sortedBy { it.path.lowercase() }
+        lastRows = rows
         val selection = _selection.value
-        return rows.filter { selection.includes(it.relativePath.orEmpty()) }.map(LocalTrackMapper::toTrack)
+        val baseTracks = rows.filter { selection.includes(it.relativePath.orEmpty()) }.map(LocalTrackMapper::toTrack)
+        return applyEdits(baseTracks)
     }
 
     private fun loadSelection(): FolderSelection {
@@ -357,5 +554,6 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
         const val TAG = "LocalMusicSource"
         const val KEY_INCLUDED = "folders_included"
         const val KEY_EXCLUDED = "folders_excluded"
+        const val KEY_TRACK_EDITS = "track_overrides_json"
     }
 }

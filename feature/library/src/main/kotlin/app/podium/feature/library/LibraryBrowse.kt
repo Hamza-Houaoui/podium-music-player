@@ -142,6 +142,7 @@ internal fun noMusic(repository: LibraryRepository): String {
 internal fun songMenu(onPlayNext: (Track) -> Unit, onAddToQueue: (Track) -> Unit, more: List<MenuAction> = emptyList()): (Track) -> Unit {
     val overlay = LocalOverlayHost.current
     val picker = LocalPlaylistPicker.current
+    val editor = LocalSongEditorHost.current
     return { track ->
         overlay.show(
             MenuSpec(
@@ -150,6 +151,9 @@ internal fun songMenu(onPlayNext: (Track) -> Unit, onAddToQueue: (Track) -> Unit
                     add(MenuAction("Play next") { onPlayNext(track) })
                     add(MenuAction("Add to Up Next") { onAddToQueue(track) })
                     if (picker != null) add(MenuAction("Add to playlist") { picker.show(overlay, listOf(track.id)) })
+                    if (editor != null && track.source.sourceId.value == "local") {
+                        add(MenuAction("Edit song info") { editor.editSong(track) })
+                    }
                     addAll(more)
                 },
             ),
@@ -163,7 +167,25 @@ fun AlbumsScreen(repository: LibraryRepository, onOpen: (AlbumId) -> Unit) {
     val loaded = rememberLoaded(repository) { repository.albums() }
     val albums = loaded?.value.orEmpty()
     val focus = rememberFocusListState("albums")
-    ListInputEffect(focus, onActivate = { albums.getOrNull(it)?.let { a -> onOpen(a.id) } })
+    val overlay = LocalOverlayHost.current
+    val editor = LocalSongEditorHost.current
+    val showAlbumMenu: (Int) -> Unit = { index ->
+        val album = albums.getOrNull(index)
+        if (album != null) {
+            overlay.show(
+                MenuSpec(
+                    album.title,
+                    buildList {
+                        add(MenuAction("Open album") { onOpen(album.id) })
+                        if (editor != null && album.id.sourceId.value == "local") {
+                            add(MenuAction("Edit album info") { editor.editAlbum(album) })
+                        }
+                    },
+                ),
+            )
+        }
+    }
+    ListInputEffect(focus, onActivate = { albums.getOrNull(it)?.let { a -> onOpen(a.id) } }, onLongPress = showAlbumMenu)
     when {
         loaded == null -> LoadingScreen()
         albums.isEmpty() -> EmptyState(PodiumSymbol.Album, "No albums yet", noMusic(repository))
@@ -173,6 +195,7 @@ fun AlbumsScreen(repository: LibraryRepository, onOpen: (AlbumId) -> Unit) {
             key = { it.id.value },
             contentPadding = LocalScreenInsets.current.listPadding(),
             onActivate = { onOpen(albums[it].id) },
+            onLongPress = showAlbumMenu,
             preview = { MenuPreview.Artwork(listOfNotNull(it.artworkUri)) },
             modifier = Modifier.fillMaxSize(),
         ) { album, _, focused ->
@@ -203,10 +226,18 @@ fun AlbumScreen(
     val rows = remember(songs) { listOf(AlbumRow.Header) + songs.mapIndexed { i, t -> AlbumRow.Song(t, i) } }
     val overlay = LocalOverlayHost.current
     val picker = LocalPlaylistPicker.current
+    val editor = LocalSongEditorHost.current
     val menu = songMenu(
         onPlayNext,
         onAddToQueue,
-        more = if (picker != null && songs.size > 1) listOf(MenuAction("Add album to playlist") { picker.show(overlay, songs.map { it.id }) }) else emptyList(),
+        more = buildList {
+            if (picker != null && songs.size > 1) {
+                add(MenuAction("Add album to playlist") { picker.show(overlay, songs.map { it.id }) })
+            }
+            if (editor != null && album != null && album.id.sourceId.value == "local") {
+                add(MenuAction("Edit album info") { editor.editAlbum(album) })
+            }
+        },
     )
     val activate: (Int) -> Unit = { i -> (rows.getOrNull(i) as? AlbumRow.Song)?.let { album?.let { a -> onPlay(songs, it.index, a.title) } } }
     ListInputEffect(focus, onActivate = activate, onLongPress = { i -> (rows.getOrNull(i) as? AlbumRow.Song)?.let { menu(it.track) } })
@@ -247,7 +278,25 @@ fun ArtistsScreen(repository: LibraryRepository, onOpen: (ArtistId) -> Unit) {
     val loaded = rememberLoaded(repository) { repository.artists() }
     val artists = loaded?.value.orEmpty()
     val focus = rememberFocusListState("artists")
-    ListInputEffect(focus, onActivate = { artists.getOrNull(it)?.let { a -> onOpen(a.id) } })
+    val overlay = LocalOverlayHost.current
+    val editor = LocalSongEditorHost.current
+    val showArtistMenu: (Int) -> Unit = { index ->
+        val artist = artists.getOrNull(index)
+        if (artist != null) {
+            overlay.show(
+                MenuSpec(
+                    artist.name,
+                    buildList {
+                        add(MenuAction("Open artist") { onOpen(artist.id) })
+                        if (editor != null && artist.id.sourceId.value == "local") {
+                            add(MenuAction("Edit artist name") { editor.editArtist(artist) })
+                        }
+                    },
+                ),
+            )
+        }
+    }
+    ListInputEffect(focus, onActivate = { artists.getOrNull(it)?.let { a -> onOpen(a.id) } }, onLongPress = showArtistMenu)
     when {
         loaded == null -> LoadingScreen()
         artists.isEmpty() -> EmptyState(PodiumSymbol.Person, "No artists yet", noMusic(repository))
@@ -257,6 +306,7 @@ fun ArtistsScreen(repository: LibraryRepository, onOpen: (ArtistId) -> Unit) {
             key = { it.id.value },
             contentPadding = LocalScreenInsets.current.listPadding(),
             onActivate = { onOpen(artists[it].id) },
+            onLongPress = showArtistMenu,
             preview = { a -> a.artworkUri?.let { MenuPreview.Artwork(listOf(it), round = true) } ?: MenuPreview.Artwork(a.covers) },
             modifier = Modifier.fillMaxSize(),
         ) { artist, _, focused ->
@@ -276,24 +326,75 @@ private sealed interface ArtistRow {
     data object Header : ArtistRow
     data object AllSongs : ArtistRow
     data class AlbumEntry(val album: LibraryAlbum) : ArtistRow
+    data class SongEntry(val track: Track, val index: Int) : ArtistRow
 }
 
-/** One artist: all their songs, then their albums. */
+/** One artist: all their songs, then their albums and songs. */
 @Composable
-fun ArtistScreen(repository: LibraryRepository, artistId: ArtistId, onOpenAlbum: (AlbumId) -> Unit, onPlay: PlayTracks) {
+fun ArtistScreen(
+    repository: LibraryRepository,
+    artistId: ArtistId,
+    onOpenAlbum: (AlbumId) -> Unit,
+    onPlay: PlayTracks,
+    onPlayNext: (Track) -> Unit = {},
+    onAddToQueue: (Track) -> Unit = {},
+) {
     val loaded = rememberLoaded(repository, artistId) { repository.artist(artistId) }
     val detail = loaded?.value
     val artist = detail?.artist
-    val rows = remember(detail) { listOf(ArtistRow.Header, ArtistRow.AllSongs) + detail?.albums.orEmpty().map { ArtistRow.AlbumEntry(it) } }
+    val songs = detail?.tracks.orEmpty()
+    val rows = remember(detail) {
+        listOf(ArtistRow.Header, ArtistRow.AllSongs) +
+            detail?.albums.orEmpty().map { ArtistRow.AlbumEntry(it) } +
+            songs.mapIndexed { i, t -> ArtistRow.SongEntry(t, i) }
+    }
     val focus = rememberFocusListState("artist:${artistId.value}")
+    val overlay = LocalOverlayHost.current
+    val editor = LocalSongEditorHost.current
+    val sMenu = songMenu(
+        onPlayNext,
+        onAddToQueue,
+        more = if (editor != null && artist != null && artist.id.sourceId.value == "local") {
+            listOf(MenuAction("Edit artist name") { editor.editArtist(artist) })
+        } else emptyList(),
+    )
     val activate: (Int) -> Unit = { i ->
         when (val row = rows.getOrNull(i)) {
             ArtistRow.AllSongs -> detail?.let { onPlay(it.tracks, 0, it.artist.name) }
             is ArtistRow.AlbumEntry -> onOpenAlbum(row.album.id)
+            is ArtistRow.SongEntry -> detail?.let { onPlay(it.tracks, row.index, it.artist.name) }
             ArtistRow.Header, null -> Unit
         }
     }
-    ListInputEffect(focus, onActivate = activate)
+    val longPress: (Int) -> Unit = { i ->
+        when (val row = rows.getOrNull(i)) {
+            ArtistRow.AllSongs -> if (editor != null && artist != null && artist.id.sourceId.value == "local") {
+                overlay.show(
+                    MenuSpec(
+                        artist.name,
+                        listOf(
+                            MenuAction("Play all songs") { detail?.let { onPlay(it.tracks, 0, it.artist.name) } },
+                            MenuAction("Edit artist name") { editor.editArtist(artist) },
+                        ),
+                    ),
+                )
+            }
+            is ArtistRow.AlbumEntry -> if (editor != null && row.album.id.sourceId.value == "local") {
+                overlay.show(
+                    MenuSpec(
+                        row.album.title,
+                        listOf(
+                            MenuAction("Open album") { onOpenAlbum(row.album.id) },
+                            MenuAction("Edit album info") { editor.editAlbum(row.album) },
+                        ),
+                    ),
+                )
+            }
+            is ArtistRow.SongEntry -> sMenu(row.track)
+            ArtistRow.Header, null -> Unit
+        }
+    }
+    ListInputEffect(focus, onActivate = activate, onLongPress = longPress)
     when {
         loaded == null -> LoadingScreen()
         artist == null -> EmptyState(PodiumSymbol.Person, "This artist isn't here anymore", "Their songs may have been removed. Go back to Artists.")
@@ -304,15 +405,18 @@ fun ArtistScreen(repository: LibraryRepository, artistId: ArtistId, onOpenAlbum:
                 when (it) {
                     ArtistRow.Header -> "header"
                     ArtistRow.AllSongs -> "all"
-                    is ArtistRow.AlbumEntry -> it.album.id.value
+                    is ArtistRow.AlbumEntry -> "album:${it.album.id.value}"
+                    is ArtistRow.SongEntry -> "song:${it.track.id.value}"
                 }
             },
             contentPadding = LocalScreenInsets.current.listPadding(),
             onActivate = activate,
+            onLongPress = longPress,
             focusable = { it !is ArtistRow.Header },
             preview = { row ->
                 when (row) {
                     is ArtistRow.AlbumEntry -> MenuPreview.Artwork(listOfNotNull(row.album.artworkUri))
+                    is ArtistRow.SongEntry -> MenuPreview.Artwork(listOfNotNull(row.track.artwork?.uri))
                     else -> MenuPreview.Artwork(artist.covers)
                 }
             },
@@ -328,6 +432,13 @@ fun ArtistScreen(repository: LibraryRepository, artistId: ArtistId, onOpenAlbum:
                 )
                 ArtistRow.AllSongs -> MenuRow("All songs", focused, leading = PodiumSymbol.PlaylistPlay, showChevron = false)
                 is ArtistRow.AlbumEntry -> TrackRow(row.album.title, songCount(row.album.trackCount), focused, row.album.artworkUri, trailing = row.album.year?.toString())
+                is ArtistRow.SongEntry -> TrackRow(
+                    title = row.track.title,
+                    subtitle = row.track.album?.title ?: row.track.artistDisplay,
+                    focused = focused,
+                    artworkUri = row.track.artwork?.uri,
+                    trailing = formatDuration(row.track.durationMs),
+                )
             }
         }
     }
@@ -383,111 +494,32 @@ fun CoverFlowScreen(repository: LibraryRepository, onOpen: (AlbumId) -> Unit) {
     }
     val loading = loaded == null
     val albums = loaded?.value.orEmpty()
-    val insets = LocalScreenInsets.current
-    val colors = PodiumTheme.colors
-    val type = PodiumTheme.type
-    val motion = PodiumTheme.motion
-    val focus = rememberFocusListState("coverflow")
-    SideEffect { focus.itemCount = albums.size }
-    ListInputEffect(focus, onActivate = { albums.getOrNull(it)?.let { a -> onOpen(a.id) } })
+    val overlay = LocalOverlayHost.current
+    val editor = LocalSongEditorHost.current
     if (loading) return
-    if (albums.isEmpty()) {
-        EmptyState(PodiumSymbol.Album, "No albums yet", noMusic(repository))
-        return
-    }
-
-    val position = remember { Animatable(focus.focusedIndex.toFloat()) }
-    val scope = rememberCoroutineScope()
-    // As a miniature (the column before an album), rest on the album that was opened.
-    LocalMiniatureFocusKey.current?.let { key ->
-        LaunchedEffect(albums, key) {
-            val i = albums.indexOfFirst { it.id.value == key }
-            if (i >= 0) {
-                focus.focus(i)
-                position.snapTo(i.toFloat())
-            }
-        }
-    }
-    LaunchedEffect(focus.focusedIndex) {
-        val target = focus.focusedIndex.toFloat()
-        if (motion.reduced) position.snapTo(target) else position.animateTo(target, spring(dampingRatio = 0.92f, stiffness = 380f))
-    }
-
-    BoxWithConstraints(Modifier.fillMaxSize().padding(top = insets.top, bottom = insets.bottom)) {
-        val cover = minOf(maxWidth * 0.5f, maxHeight * 0.58f)
-        val stageY = (maxHeight - cover) * 0.38f
-        val spacingPx = cover.value * 0.62f
-        // Which covers exist changes only when the middle one does; where each one is, how far it's
-        // turned and how dim, are read while drawing — the stage never recomposes per frame (D-65).
-        val middle by remember { derivedStateOf { position.value.roundToInt() } }
-        val pxPerDp = LocalDensity.current.density
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(cover)
-                .offset(y = stageY)
-                .draggable(
-                    state = rememberDraggableState { dx ->
-                        val next = (position.value - dx / (spacingPx * pxPerDp)).coerceIn(0f, albums.lastIndex.toFloat())
-                        scope.launch(start = CoroutineStart.UNDISPATCHED) { position.snapTo(next) }
-                    },
-                    orientation = Orientation.Horizontal,
-                    onDragStopped = { pixelsPerSecond ->
-                        // A flick carries on to the cover it was heading for, keeping its speed; a
-                        // finger that stopped before lifting settles on the nearest.
-                        val speed = -pixelsPerSecond / (spacingPx * pxPerDp)
-                        val target = (position.value + speed * FLING_SECONDS).roundToInt().coerceIn(0, albums.lastIndex)
-                        scope.launch { position.animateTo(target.toFloat(), spring(dampingRatio = 0.92f, stiffness = 380f), initialVelocity = speed) }
-                        focus.focus(target)
+    app.podium.core.designsystem.component.CoverFlowStage(
+        items = albums,
+        stateKey = "coverflow",
+        keyOf = { it.id.value },
+        titleOf = { it.title },
+        subtitleOf = { it.artist },
+        artworkOf = { it.artworkUri },
+        onActivate = { album, _ -> onOpen(album.id) },
+        onLongPress = { album, _ ->
+            overlay.show(
+                MenuSpec(
+                    album.title,
+                    buildList {
+                        add(MenuAction("Open album") { onOpen(album.id) })
+                        if (editor != null && album.id.sourceId.value == "local") {
+                            add(MenuAction("Edit album info") { editor.editAlbum(album) })
+                        }
                     },
                 ),
-        ) {
-            val window = (middle - 4)..(middle + 4)
-            for (i in window) {
-                val album = albums.getOrNull(i) ?: continue
-                Box(
-                    Modifier
-                        .zIndex(-abs(i - middle).toFloat())
-                        .align(Alignment.Center)
-                        .size(cover)
-                        .graphicsLayer {
-                            val d = i - position.value
-                            val near = d.coerceIn(-1f, 1f)
-                            // Within one step the cover travels to its slot; beyond, neighbours stack closer.
-                            val x = if (abs(d) <= 1f) d * spacingPx else sign(d) * (spacingPx + (abs(d) - 1f) * cover.value * 0.24f)
-                            translationX = x * density
-                            rotationY = -near * 58f
-                            cameraDistance = 14f * density
-                            val s = 1f - 0.16f * abs(near)
-                            scaleX = s
-                            scaleY = s
-                            alpha = (1f - (abs(d) - 2.5f).coerceAtLeast(0f)).coerceIn(0f, 1f)
-                        }
-                        .pointerInput(i) {
-                            detectTapGestures { if (i == focus.focusedIndex) onOpen(album.id) else focus.focus(i) }
-                        }
-                        .semantics { contentDescription = "${album.title} by ${album.artist}" },
-                ) {
-                    ArtworkImage(album.artworkUri, cover, fallbackText = album.title, modifier = Modifier.fillMaxSize())
-                }
-            }
-        }
-        val current = albums.getOrNull(focus.focusedIndex)
-        AnimatedContent(
-            targetState = current,
-            transitionSpec = { fadeIn(tween(if (motion.reduced) 0 else 200)) togetherWith fadeOut(tween(if (motion.reduced) 0 else 120)) },
-            modifier = Modifier.align(Alignment.TopCenter).offset(y = stageY + cover + Spacing.l).padding(horizontal = Spacing.xl),
-            label = "coverFlowTitle",
-        ) { album ->
-            if (album != null) {
-                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    PodiumText(album.title, illuminated(type.rowFocused, true), colors.labelPrimary, textAlign = TextAlign.Center)
-                    PodiumText(album.artist, type.rowSecondary, colors.labelSecondary, textAlign = TextAlign.Center)
-                }
-            }
-        }
-    }
+            )
+        },
+        emptySymbol = PodiumSymbol.Album,
+        emptyTitle = "No albums yet",
+        emptyMessage = noMusic(repository),
+    )
 }
-
-/** How far ahead a Cover Flow flick looks along its speed. */
-private const val FLING_SECONDS = 0.15f

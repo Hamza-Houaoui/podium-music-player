@@ -182,11 +182,139 @@ fun showTrackMenu(
                 }
                 add(MenuAction(if (liked) "Remove from liked songs" else "Like") { repository.setLiked(track, !liked) })
                 add(MenuAction("Add to playlist") { showAddToPlaylist(overlay, listOf(track), repository, scope, navigate = navigate) })
+                if (actions.isDownloaded(track.id)) {
+                    add(MenuAction("Remove download") { actions.removeDownload(track.id) })
+                } else if (actions.isDownloading(track.id)) {
+                    add(MenuAction("Cancel download") { actions.removeDownload(track.id) })
+                } else if (playable && track.queuesHere && track.kind != app.podium.core.model.MediaKind.LIVE) {
+                    add(MenuAction("Download") { actions.download(track) })
+                }
                 if (canRecommend && playable) add(MenuAction("Start radio") { actions.startRadio(track) })
                 val album = track.album
-                if (album?.id != null) add(MenuAction("Go to album") { navigate(OnlinePlace.Collection(app.podium.core.model.PlaylistId(album.id!!.value), album.title, isAlbum = true)) })
-                artists.forEach { a -> add(MenuAction("Go to ${a.name}") { navigate(OnlinePlace.Artist(a.id!!, a.name)) }) }
+                if (album?.id != null) {
+                    add(MenuAction("Go to album") { navigate(OnlinePlace.Collection(app.podium.core.model.PlaylistId(album.id!!.value), album.title, isAlbum = true)) })
+                    add(MenuAction("Download album") { actions.downloadCollection(app.podium.core.model.PlaylistId(album.id!!.value)) })
+                }
+                artists.forEach { a ->
+                    add(MenuAction("Go to ${a.name}") { navigate(OnlinePlace.Artist(a.id!!, a.name)) })
+                }
                 if (track.source.providerUri != null) add(MenuAction("Share") { actions.share(track) })
+            },
+        ),
+    )
+}
+
+/** Long-press menu for an online album row: Download album, Play, Shuffle, Add to playlist, Open. */
+fun showAlbumMenu(
+    overlay: OverlayHost,
+    album: app.podium.sources.api.AlbumSummary,
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    scope: CoroutineScope,
+    navigate: (OnlinePlace) -> Unit,
+) {
+    val collectionId = app.podium.core.model.PlaylistId(album.id.value)
+    overlay.show(
+        MenuSpec(
+            album.title,
+            listOf(
+                MenuAction("Download album") { actions.downloadCollection(collectionId) },
+                MenuAction("Play album") {
+                    scope.launch {
+                        val tracks = (repository.collection(collectionId) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) actions.playCollection(tracks, 0, album.title, collectionId)
+                    }
+                },
+                MenuAction("Shuffle album") {
+                    scope.launch {
+                        val tracks = (repository.collection(collectionId) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) actions.playCollection(tracks, 0, album.title, collectionId, shuffle = true)
+                    }
+                },
+                MenuAction("Add to playlist") {
+                    scope.launch {
+                        val tracks = (repository.collection(collectionId) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) showAddToPlaylist(overlay, tracks, repository, scope, navigate = navigate)
+                    }
+                },
+                MenuAction("Open album") { navigate(OnlinePlace.Collection(collectionId, album.title, isAlbum = true)) },
+            ),
+        ),
+    )
+}
+
+/** Long-press menu for an online playlist (or album collection) row: Download, Play, Shuffle, Add to playlist, Open. */
+fun showPlaylistMenu(
+    overlay: OverlayHost,
+    playlist: app.podium.sources.api.PlaylistSummary,
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    scope: CoroutineScope,
+    navigate: (OnlinePlace) -> Unit,
+) {
+    val kindLabel = if (playlist.isAlbum) "album" else "playlist"
+    overlay.show(
+        MenuSpec(
+            playlist.title,
+            listOf(
+                MenuAction("Download $kindLabel") { actions.downloadCollection(playlist.id) },
+                MenuAction("Play $kindLabel") {
+                    scope.launch {
+                        val tracks = (repository.collection(playlist.id) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) actions.playCollection(tracks, 0, playlist.title, playlist.id)
+                    }
+                },
+                MenuAction("Shuffle $kindLabel") {
+                    scope.launch {
+                        val tracks = (repository.collection(playlist.id) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) actions.playCollection(tracks, 0, playlist.title, playlist.id, shuffle = true)
+                    }
+                },
+                MenuAction("Add to playlist") {
+                    scope.launch {
+                        val tracks = (repository.collection(playlist.id) as? Outcome.Success)?.value?.tracks
+                            ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                        if (tracks.isNotEmpty()) showAddToPlaylist(overlay, tracks, repository, scope, navigate = navigate)
+                    }
+                },
+                MenuAction("Open $kindLabel") { navigate(OnlinePlace.Collection(playlist.id, playlist.title, playlist.isAlbum)) },
+            ),
+        ),
+    )
+}
+
+/** Long-press menu for an online artist row: Download artist songs, Play popular songs, Start radio, Open artist. */
+fun showArtistMenu(
+    overlay: OverlayHost,
+    artist: ArtistSummary,
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    scope: CoroutineScope,
+    navigate: (OnlinePlace) -> Unit,
+) {
+    overlay.show(
+        MenuSpec(
+            artist.name,
+            buildList {
+                add(MenuAction("Download artist songs") { actions.downloadArtist(artist.id) })
+                add(
+                    MenuAction("Play popular songs") {
+                        scope.launch {
+                            val tracks = (repository.artist(artist.id) as? Outcome.Success)?.value?.tracks
+                                ?.filter { it.availability !is Availability.Unavailable }.orEmpty()
+                            if (tracks.isNotEmpty()) actions.play(tracks, 0, artist.name)
+                        }
+                    },
+                )
+                if (repository.canRelate(artist.id)) {
+                    add(MenuAction("Start artist radio") { actions.startArtistRadio(artist) })
+                }
+                add(MenuAction("Open artist") { navigate(OnlinePlace.Artist(artist.id, artist.name)) })
             },
         ),
     )

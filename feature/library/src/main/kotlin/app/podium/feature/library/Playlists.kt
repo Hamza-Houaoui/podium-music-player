@@ -109,6 +109,17 @@ const val ADDED = "Added"
 
 val LocalPlaylistPicker = staticCompositionLocalOf<PlaylistPicker?> { null }
 
+/**
+ * Editing metadata (title, artist, album) and lyrics for local music on the device.
+ */
+interface LocalSongEditor {
+    fun editSong(track: Track)
+    fun editAlbum(album: LibraryAlbum)
+    fun editArtist(artist: LibraryArtist)
+}
+
+val LocalSongEditorHost = staticCompositionLocalOf<LocalSongEditor?> { null }
+
 /** Songs waiting for the playlist that's being named: one step of one flow, never saved. */
 object PendingPlaylistSongs {
     var songs: List<TrackId> = emptyList()

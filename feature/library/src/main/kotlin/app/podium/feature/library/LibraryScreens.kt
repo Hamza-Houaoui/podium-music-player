@@ -33,6 +33,7 @@ private data class MenuEntry(
     val action: () -> Unit,
     val leading: PodiumSymbol? = null,
     val chevron: Boolean = true,
+    val value: String? = null,
 )
 
 @Composable
@@ -48,7 +49,7 @@ private fun PaperMenu(entries: List<MenuEntry>, stateKey: String) {
         preview = { it.preview },
         modifier = Modifier.fillMaxSize(),
     ) { entry, _, focused ->
-        MenuRow(entry.label, focused, leading = entry.leading, showChevron = entry.chevron)
+        MenuRow(entry.label, focused, value = entry.value, leading = entry.leading, showChevron = entry.chevron)
     }
 }
 
@@ -68,6 +69,11 @@ fun HomeScreen(
     /** ONLINE (D-34), when an online source is connected; [onlineArtwork] previews it. */
     onOnline: (() -> Unit)? = null,
     onlineArtwork: List<String> = emptyList(),
+    /** Online Radio (Tunisian FM + worldwide directory). */
+    onRadio: (() -> Unit)? = null,
+    /** Listen Together: local-network synchronized listening with friends. */
+    onListenTogether: (() -> Unit)? = null,
+    listenTogetherValue: String? = null,
     /** A source that needs the listener (music access) offers its action first, as in Music. */
     onSourceAction: (CapabilityAction) -> Unit = {},
 ) {
@@ -80,6 +86,8 @@ fun HomeScreen(
         actions.forEach { add(MenuEntry(it.note, MenuPreview.None, { onSourceAction(it.action) }, leading = PodiumSymbol.Lock, chevron = false)) }
         add(MenuEntry("Music", MenuPreview.Artwork(art), onMusic))
         if (onOnline != null) add(MenuEntry("Online", if (onlineArtwork.isEmpty()) MenuPreview.None else MenuPreview.Carousel(onlineArtwork), onOnline))
+        if (onRadio != null) add(MenuEntry("Radio", MenuPreview.Instrument, onRadio))
+        if (onListenTogether != null) add(MenuEntry("Listen together", MenuPreview.Instrument, onListenTogether, value = listenTogetherValue))
         add(MenuEntry("Shuffle songs", MenuPreview.Carousel(shuffled), onShuffleSongs, chevron = false))
         if (nowPlayingActive) add(MenuEntry("Now Playing", MenuPreview.Artwork(listOfNotNull(nowPlayingArtwork)), onNowPlaying))
         add(MenuEntry("Settings", MenuPreview.Instrument, onSettings))
@@ -101,6 +109,10 @@ fun MusicScreen(
     /** The listener's playlists (D-106); null leaves Playlists out. */
     playlists: PlaylistRepository? = null,
     onPlaylists: () -> Unit = {},
+    /** Offline downloaded songs; shown in Music for offline access. */
+    onDownloads: (() -> Unit)? = null,
+    downloadsValue: String? = null,
+    downloadsArtwork: List<String> = emptyList(),
 ) {
     val songs by repository.songs.collectAsStateWithLifecycle()
     val actions by repository.pendingActions.collectAsStateWithLifecycle()
@@ -122,6 +134,7 @@ fun MusicScreen(
         add(MenuEntry("Songs", MenuPreview.Artwork(songArt), onSongs))
         add(MenuEntry("Favorites", if (favoriteArt.isEmpty()) MenuPreview.None else MenuPreview.Artwork(favoriteArt), onFavorites))
         if (playlists != null) add(MenuEntry("Playlists", if (playlistArt.isEmpty()) MenuPreview.None else MenuPreview.Artwork(playlistArt), onPlaylists))
+        if (onDownloads != null) add(MenuEntry("Downloads", if (downloadsArtwork.isEmpty()) MenuPreview.None else MenuPreview.Artwork(downloadsArtwork), onDownloads, value = downloadsValue))
     }
     PaperMenu(entries, "music")
 }

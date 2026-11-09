@@ -180,6 +180,9 @@ fun OnlineSearchScreen(repository: OnlineRepository, actions: OnlineActions, nav
         when (val row = rows.getOrNull(i)) {
             is SearchRow.Song -> showTrackMenu(overlayHost, row.track, repository, actions, scope, navigate)
             is SearchRow.Video -> showTrackMenu(overlayHost, row.track, repository, actions, scope, navigate)
+            is SearchRow.Artist -> showArtistMenu(overlayHost, row.artist, repository, actions, scope, navigate)
+            is SearchRow.Album -> showAlbumMenu(overlayHost, row.album, repository, actions, scope, navigate)
+            is SearchRow.Playlist -> showPlaylistMenu(overlayHost, row.playlist, repository, actions, scope, navigate)
             else -> Unit
         }
     }

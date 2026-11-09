@@ -71,7 +71,7 @@ import app.podium.core.interaction.WheelContext
 import app.podium.core.interaction.rememberFocusListState
 import app.podium.core.interaction.rememberPodiumHaptics
 
-private enum class SettingsRow { Appearance, PodiumSpace, FullScreen, TitleBarBattery, NowPlayingLayout, HideNowPlayingTray, Keyboard, MusicFolders, OnlineSources, CustomSources, Autoplay, Recommendations, AvoidRepeats, Crossfade, Equalizer, SleepTimer, OnlineLyrics, LyricsCredit, Haptics, Clicks, StartupSound, SoftwareUpdate }
+private enum class SettingsRow { Appearance, PodiumSpace, FullScreen, TitleBarBattery, NowPlayingLayout, HideNowPlayingTray, Keyboard, MusicFolders, OnlineSources, CustomSources, SmartDownloads, Autoplay, Recommendations, AvoidRepeats, Crossfade, Equalizer, SleepTimer, OnlineLyrics, LyricsCredit, Haptics, Clicks, StartupSound, SoftwareUpdate }
 
 /** Settings ▸ Software update (D-99): the version, a check now, and whether Podium checks by itself. */
 interface SoftwareUpdateSettings {
@@ -108,6 +108,9 @@ fun SettingsScreen(
     /** Settings ▸ Custom sources (D-91): the listener's own stream sources; null in a build without online music. */
     customSources: CustomSourcesSettings? = null,
     onCustomSources: () -> Unit = {},
+    /** Settings ▸ Smart downloads: auto-downloads liked and recently played songs on Wi-Fi. */
+    smartDownloads: kotlinx.coroutines.flow.StateFlow<Boolean>? = null,
+    onSetSmartDownloads: ((Boolean) -> Unit)? = null,
     /** Settings ▸ Software update (D-99); null in a build that can't check. */
     softwareUpdate: SoftwareUpdateSettings? = null,
 ) {
@@ -151,9 +154,11 @@ fun SettingsScreen(
     val rows = SettingsRow.entries.filter {
         (it != SettingsRow.OnlineSources || service != null) &&
             (it != SettingsRow.CustomSources || (service != null && customSources != null)) &&
+            (it != SettingsRow.SmartDownloads || (service != null && smartDownloads != null)) &&
             (it != SettingsRow.SleepTimer || sleepTimer != null) &&
             (it != SettingsRow.SoftwareUpdate || softwareUpdate != null)
     }
+    val smartDownloadsOn by (smartDownloads ?: remember { kotlinx.coroutines.flow.MutableStateFlow(false) }).collectAsStateWithLifecycle()
     val automaticUpdates by (softwareUpdate?.automatic ?: remember { kotlinx.coroutines.flow.MutableStateFlow(false) }).collectAsStateWithLifecycle()
     val focus = rememberFocusListState("settings")
     val activate: (Int) -> Unit = { index ->
@@ -183,6 +188,10 @@ fun SettingsScreen(
             SettingsRow.MusicFolders -> onMusicFolders()
             SettingsRow.OnlineSources -> onOnlineService()
             SettingsRow.CustomSources -> onCustomSources()
+            SettingsRow.SmartDownloads -> {
+                haptics.toggle(on = !smartDownloadsOn)
+                onSetSmartDownloads?.invoke(!smartDownloadsOn)
+            }
             SettingsRow.Autoplay -> {
                 haptics.toggle(on = !autoplayOn)
                 repository.setAutoplay(!autoplayOn)
@@ -304,6 +313,7 @@ fun SettingsScreen(
             )
             SettingsRow.OnlineSources -> MenuRow(service?.name ?: "Online music", focused, value = onlineServiceSummary(service))
             SettingsRow.CustomSources -> MenuRow("Custom sources", focused, value = customSourcesSummary(customList))
+            SettingsRow.SmartDownloads -> MenuRow("Smart downloads", focused, value = if (smartDownloadsOn) "On" else "Off", showChevron = false)
             SettingsRow.Autoplay -> MenuRow("Autoplay", focused, value = if (autoplayOn) "On" else "Off", showChevron = false)
             SettingsRow.Recommendations -> MenuRow("Online recommendations", focused, value = if (recommendationsOn) "On" else "Off", enabled = autoplayOn, showChevron = false)
             SettingsRow.AvoidRepeats -> MenuRow("Avoid repeats", focused, value = if (avoidRepeatsOn) "On" else "Off", enabled = autoplayOn, showChevron = false)

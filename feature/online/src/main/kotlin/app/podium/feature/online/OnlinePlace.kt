@@ -11,6 +11,7 @@ sealed interface OnlinePlace {
     val title: String
 
     data object Menu : OnlinePlace { override val title = "Online" }
+    data object CoverFlow : OnlinePlace { override val title = "Cover Flow" }
     data object Home : OnlinePlace { override val title = "Home" }
     data object Explore : OnlinePlace { override val title = "Explore" }
     data object Search : OnlinePlace { override val title = "Search" }
@@ -46,6 +47,7 @@ sealed interface OnlinePlace {
 
         fun encode(place: OnlinePlace): String = when (place) {
             Menu -> "menu"
+            CoverFlow -> "cover-flow"
             Home -> "home"
             Explore -> "explore"
             Search -> "search"
@@ -72,6 +74,7 @@ sealed interface OnlinePlace {
             val p = text.split(SEP)
             return when (p[0]) {
                 "menu" -> Menu
+                "cover-flow" -> CoverFlow
                 "home" -> Home
                 "explore" -> Explore
                 "search" -> Search

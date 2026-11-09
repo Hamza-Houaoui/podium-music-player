@@ -35,20 +35,21 @@ fun OnlineScreen(place: OnlinePlace, repository: OnlineRepository, actions: Onli
     TrackPlaylists(repository)
     when (place) {
         OnlinePlace.Menu -> OnlineMenuScreen(repository, actions, navigate)
-        OnlinePlace.Home -> OnlineHomeScreen(repository, navigate)
+        OnlinePlace.CoverFlow -> OnlineCoverFlowScreen(repository, actions, navigate)
+        OnlinePlace.Home -> OnlineHomeScreen(repository, actions, navigate)
         OnlinePlace.Explore -> OnlineExploreScreen(repository, navigate)
         OnlinePlace.Search -> OnlineSearchScreen(repository, actions, navigate)
         OnlinePlace.Liked -> OnlineLikedScreen(repository, actions, navigate)
-        OnlinePlace.Playlists -> OnlinePlaylistsScreen(repository, navigate)
+        OnlinePlace.Playlists -> OnlinePlaylistsScreen(repository, actions, navigate)
         OnlinePlace.Radio -> OnlineRadioScreen(repository, actions)
         OnlinePlace.LiveRadio -> OnlineLiveRadioScreen(repository, navigate)
         is OnlinePlace.LiveGenre -> OnlineLiveGenreScreen(place.name, repository, actions, navigate)
         OnlinePlace.History -> if (repository.status.value?.canHistory == true) OnlineAccountHistoryScreen(repository, actions, navigate) else OnlineHistoryScreen(repository, actions, navigate)
         OnlinePlace.Recent -> OnlineHistoryScreen(repository, actions, navigate)
         OnlinePlace.Library -> OnlineLibraryScreen(repository, actions, navigate)
-        OnlinePlace.LibraryPlaylists -> OnlineLibraryPlaylistsScreen(repository, navigate)
-        OnlinePlace.LibraryAlbums -> OnlineLibraryAlbumsScreen(repository, navigate)
-        OnlinePlace.LibraryArtists -> OnlineLibraryArtistsScreen(repository, navigate)
+        OnlinePlace.LibraryPlaylists -> OnlineLibraryPlaylistsScreen(repository, actions, navigate)
+        OnlinePlace.LibraryAlbums -> OnlineLibraryAlbumsScreen(repository, actions, navigate)
+        OnlinePlace.LibraryArtists -> OnlineLibraryArtistsScreen(repository, actions, navigate)
         is OnlinePlace.Shelf -> OnlineShelfScreen(place, repository, actions, navigate)
         is OnlinePlace.Genre -> OnlineGenreScreen(place.name, repository, actions, navigate)
         is OnlinePlace.Artist -> OnlineArtistScreen(place, repository, actions, navigate)
@@ -70,14 +71,18 @@ fun OnlineMenuScreen(repository: OnlineRepository, actions: OnlineActions, navig
     val liked by repository.likedTracks.collectAsStateWithLifecycle(initialValue = emptyList())
     val playlists by repository.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
     val recent by repository.recentlyPlayed.collectAsStateWithLifecycle(initialValue = emptyList())
+    val downloadsCount by actions.downloadsCount.collectAsStateWithLifecycle()
     val trending = (shelves as? Remote.Ready)?.value.orEmpty()
     val trendingArt = trending.flatMap { shelfCovers(it) }.distinct().take(10)
     val account = current.account
     val entries = buildList {
+        val coverFlowArt = trendingArt.ifEmpty { covers(liked + recent) }
+        add(OnlineEntry("Cover Flow", MenuPreview.Carousel(coverFlowArt)) { navigate(OnlinePlace.CoverFlow) })
         if (current.canBrowse) add(OnlineEntry("Home", MenuPreview.Carousel(trendingArt)) { navigate(OnlinePlace.Home) })
         if (current.canBrowse && current.canExplore) add(OnlineEntry("Explore", MenuPreview.Artwork(trending.drop(1).flatMap { shelfCovers(it) }.distinct().take(8))) { navigate(OnlinePlace.Explore) })
         if (current.canSearch) add(OnlineEntry("Search", MenuPreview.Instrument, leading = PodiumSymbol.Search) { navigate(OnlinePlace.Search) })
         add(OnlineEntry("Library", if (liked.isEmpty()) MenuPreview.None else MenuPreview.Artwork(covers(liked)), value = playlists.size.takeIf { it > 0 && !current.canLibrary }?.toString()) { navigate(OnlinePlace.Library) })
+        add(OnlineEntry("Downloads", MenuPreview.Instrument, value = downloadsCount.takeIf { it > 0 }?.toString()) { actions.openDownloads() })
         if (current.canRecommend) add(OnlineEntry("Radio", MenuPreview.Carousel(covers(recent).ifEmpty { trendingArt.reversed() })) { navigate(OnlinePlace.Radio) })
         if (current.canLiveRadio) add(OnlineEntry("Live radio", MenuPreview.Instrument) { navigate(OnlinePlace.LiveRadio) })
         add(OnlineEntry("History", if (recent.isEmpty()) MenuPreview.None else MenuPreview.Artwork(covers(recent))) { navigate(OnlinePlace.History) })
@@ -107,16 +112,18 @@ private fun shelfCovers(shelf: Shelf): List<String> =
  * listener's (recently played, liked, playlists). Each previews its artwork beyond the arc.
  */
 @Composable
-fun OnlineHomeScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Unit) {
+fun OnlineHomeScreen(repository: OnlineRepository, actions: OnlineActions, navigate: (OnlinePlace) -> Unit) {
     val shelves = rememberRemote(Unit) { repository.shelves() }
     val liked by repository.likedTracks.collectAsStateWithLifecycle(initialValue = emptyList())
     val recent by repository.recentlyPlayed.collectAsStateWithLifecycle(initialValue = emptyList())
+    val overlayHost = overlay()
     when (shelves) {
         Remote.Loading -> LoadingScreen()
         is Remote.Failed -> OnlineMessage(shelves.error)
         is Remote.Ready -> {
+            val shelfList = shelves.value
             val entries = buildList {
-                shelves.value.forEach { shelf ->
+                shelfList.forEach { shelf ->
                     add(
                         OnlineEntry(shelf.title, MenuPreview.Carousel(shelfCovers(shelf).take(12))) {
                             navigate(OnlinePlace.Shelf(shelf.id, shelf.title))
@@ -127,7 +134,51 @@ fun OnlineHomeScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Un
                 if (liked.isNotEmpty()) add(OnlineEntry("Your liked songs", MenuPreview.Artwork(covers(liked))) { navigate(OnlinePlace.Liked) })
                 add(OnlineEntry("Your playlists", MenuPreview.None) { navigate(OnlinePlace.Playlists) })
             }
-            OnlinePaperMenu(entries, "online-home")
+            OnlinePaperMenu(
+                entries = entries,
+                stateKey = "online-home",
+                onLongPress = { idx ->
+                    val entry = entries.getOrNull(idx) ?: return@OnlinePaperMenu
+                    when {
+                        idx < shelfList.size -> {
+                            val shelf = shelfList[idx]
+                            if (shelf.tracks.isNotEmpty()) {
+                                overlayHost.show(
+                                    app.podium.core.designsystem.component.MenuSpec(
+                                        shelf.title,
+                                        listOf(
+                                            app.podium.core.designsystem.component.MenuAction("Download all") { actions.downloadAll(shelf.tracks) },
+                                            app.podium.core.designsystem.component.MenuAction("Open") { navigate(OnlinePlace.Shelf(shelf.id, shelf.title)) },
+                                        ),
+                                    ),
+                                )
+                            }
+                        }
+                        entry.label == "Recently played" && recent.isNotEmpty() -> {
+                            overlayHost.show(
+                                app.podium.core.designsystem.component.MenuSpec(
+                                    "Recently played",
+                                    listOf(
+                                        app.podium.core.designsystem.component.MenuAction("Download all") { actions.downloadAll(recent) },
+                                        app.podium.core.designsystem.component.MenuAction("Open") { navigate(OnlinePlace.Recent) },
+                                    ),
+                                ),
+                            )
+                        }
+                        entry.label == "Your liked songs" && liked.isNotEmpty() -> {
+                            overlayHost.show(
+                                app.podium.core.designsystem.component.MenuSpec(
+                                    "Your liked songs",
+                                    listOf(
+                                        app.podium.core.designsystem.component.MenuAction("Download all") { actions.downloadAll(liked) },
+                                        app.podium.core.designsystem.component.MenuAction("Open") { navigate(OnlinePlace.Liked) },
+                                    ),
+                                ),
+                            )
+                        }
+                    }
+                },
+            )
         }
     }
 }
@@ -168,8 +219,8 @@ fun OnlineShelfScreen(place: OnlinePlace.Shelf, repository: OnlineRepository, ac
         Remote.Loading -> LoadingScreen()
         is Remote.Failed -> OnlineMessage(s.error)
         is Remote.Ready -> when {
-            playlists.isNotEmpty() -> PlaylistList(playlists, "shelf:${place.id}", navigate, onNearEnd = loadMore, exhausted = exhausted)
-            tracks.isEmpty() && artists.isNotEmpty() -> ArtistList(artists, "shelf:${place.id}", navigate)
+            playlists.isNotEmpty() -> PlaylistList(playlists, "shelf:${place.id}", repository, actions, navigate, onNearEnd = loadMore, exhausted = exhausted)
+            tracks.isEmpty() && artists.isNotEmpty() -> ArtistList(artists, "shelf:${place.id}", repository, actions, navigate)
             else -> OnlineTrackList(tracks, "shelf:${place.id}", place.title, repository, actions, navigate, onNearEnd = loadMore, exhausted = exhausted)
         }
     }
@@ -236,7 +287,10 @@ fun OnlineLikedScreen(repository: OnlineRepository, actions: OnlineActions, navi
     }
     OnlineTrackList(
         songs, "online-liked", "Liked songs", repository, actions, navigate,
-        lead = listOf(Lead("Shuffle", PodiumSymbol.Shuffle) { actions.shuffle(songs, "Liked songs") }),
+        lead = listOf(
+            Lead("Shuffle", PodiumSymbol.Shuffle) { actions.shuffle(songs, "Liked songs") },
+            Lead("Download all", PodiumSymbol.Queue) { actions.downloadAll(songs) },
+        ),
     )
 }
 
@@ -388,12 +442,23 @@ fun OnlineTrackList(
     }
 }
 
-/** A list of playlists or albums from the source; Center opens one. */
+/** A list of playlists or albums from the source; Center opens one, hold Center opens its menu. */
 @Composable
-fun PlaylistList(playlists: List<PlaylistSummary>, stateKey: String, navigate: (OnlinePlace) -> Unit, onNearEnd: () -> Unit = {}, exhausted: Boolean = true) {
+fun PlaylistList(
+    playlists: List<PlaylistSummary>,
+    stateKey: String,
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    navigate: (OnlinePlace) -> Unit,
+    onNearEnd: () -> Unit = {},
+    exhausted: Boolean = true,
+) {
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
     val focus = rememberFocusListState(stateKey)
     val open: (Int) -> Unit = { i -> playlists.getOrNull(i)?.let { navigate(OnlinePlace.Collection(it.id, it.title, it.isAlbum)) } }
-    ListInputEffect(focus, onActivate = open)
+    val longPress: (Int) -> Unit = { i -> playlists.getOrNull(i)?.let { showPlaylistMenu(overlayHost, it, repository, actions, scope, navigate) } }
+    ListInputEffect(focus, onActivate = open, onLongPress = longPress)
     PageNearEnd(focus, playlists.size, exhausted, onNearEnd)
     FocusList(
         items = playlists,
@@ -401,6 +466,7 @@ fun PlaylistList(playlists: List<PlaylistSummary>, stateKey: String, navigate: (
         key = { it.id.value },
         contentPadding = LocalScreenInsets.current.listPadding(),
         onActivate = open,
+        onLongPress = longPress,
         preview = { MenuPreview.Artwork(listOfNotNull(it.artwork?.uri)) },
         modifier = Modifier.fillMaxSize(),
     ) { p, _, focused ->
@@ -408,21 +474,141 @@ fun PlaylistList(playlists: List<PlaylistSummary>, stateKey: String, navigate: (
     }
 }
 
-/** A list of artists; Center opens one. */
+/** A list of artists; Center opens one, hold Center opens its menu. */
 @Composable
-fun ArtistList(artists: List<app.podium.sources.api.ArtistSummary>, stateKey: String, navigate: (OnlinePlace) -> Unit) {
+fun ArtistList(
+    artists: List<app.podium.sources.api.ArtistSummary>,
+    stateKey: String,
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    navigate: (OnlinePlace) -> Unit,
+) {
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
     val focus = rememberFocusListState(stateKey)
     val open: (Int) -> Unit = { i -> artists.getOrNull(i)?.let { navigate(OnlinePlace.Artist(it.id, it.name)) } }
-    ListInputEffect(focus, onActivate = open)
+    val longPress: (Int) -> Unit = { i -> artists.getOrNull(i)?.let { showArtistMenu(overlayHost, it, repository, actions, scope, navigate) } }
+    ListInputEffect(focus, onActivate = open, onLongPress = longPress)
     FocusList(
         items = artists,
         state = focus,
         key = { it.id.value },
         contentPadding = LocalScreenInsets.current.listPadding(),
         onActivate = open,
+        onLongPress = longPress,
         preview = { a -> a.artwork?.uri?.let { MenuPreview.Artwork(listOf(it), round = true) } ?: MenuPreview.None },
         modifier = Modifier.fillMaxSize(),
     ) { a, _, focused -> OnlineArtistRow(a, focused) }
 }
 
 internal const val PAGE = 25
+
+private sealed interface OnlineCoverItem {
+    val key: String
+    val title: String
+    val subtitle: String
+    val artworkUri: String?
+
+    data class CollectionItem(val summary: PlaylistSummary) : OnlineCoverItem {
+        override val key: String = "col:${summary.id.value}"
+        override val title: String = summary.title
+        override val subtitle: String = summary.ownerName ?: if (summary.isAlbum) "Album" else "Playlist"
+        override val artworkUri: String? = summary.artwork?.uri
+    }
+
+    data class SongItem(val track: Track) : OnlineCoverItem {
+        override val key: String = "trk:${track.id.value}"
+        override val title: String = track.title
+        override val subtitle: String = listOfNotNull(track.artistDisplay.takeIf { it.isNotBlank() }, track.album?.title).joinToString(" · ")
+        override val artworkUri: String? = track.artwork?.uri
+    }
+}
+
+/**
+ * ONLINE ▸ Cover Flow: trending/home albums, playlists, and songs alongside the listener's liked
+ * and recently played tracks. Pressing Center opens a collection or plays the song; holding opens
+ * the full online menu (Play, Download, Add to playlist, Go to album/artist).
+ */
+@Composable
+fun OnlineCoverFlowScreen(
+    repository: OnlineRepository,
+    actions: OnlineActions,
+    navigate: (OnlinePlace) -> Unit,
+) {
+    val status by repository.status.collectAsStateWithLifecycle()
+    val shelves = rememberRemote(status) {
+        if (status?.canBrowse == true) repository.shelves() else Outcome.Success(emptyList())
+    }
+    val liked by repository.likedTracks.collectAsStateWithLifecycle(initialValue = emptyList())
+    val recent by repository.recentlyPlayed.collectAsStateWithLifecycle(initialValue = emptyList())
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
+
+    val shelfList = (shelves as? Remote.Ready)?.value.orEmpty()
+    val items = remember(shelfList, liked, recent) {
+        val seen = HashSet<String>()
+        buildList {
+            shelfList.forEach { shelf ->
+                shelf.playlists.forEach { col ->
+                    val item = OnlineCoverItem.CollectionItem(col)
+                    if (seen.add(item.key)) add(item)
+                }
+                shelf.tracks.forEach { trk ->
+                    val item = OnlineCoverItem.SongItem(trk)
+                    if (seen.add(item.key)) add(item)
+                }
+            }
+            liked.forEach { trk ->
+                val item = OnlineCoverItem.SongItem(trk)
+                if (seen.add(item.key)) add(item)
+            }
+            recent.forEach { trk ->
+                val item = OnlineCoverItem.SongItem(trk)
+                if (seen.add(item.key)) add(item)
+            }
+        }
+    }
+
+    val allSongs = remember(items) {
+        items.filterIsInstance<OnlineCoverItem.SongItem>().map { it.track }
+            .filter { it.availability !is app.podium.core.model.Availability.Unavailable }
+    }
+
+    if (shelves is Remote.Loading && items.isEmpty()) {
+        LoadingScreen()
+        return
+    }
+
+    app.podium.core.designsystem.component.CoverFlowStage(
+        items = items,
+        stateKey = "online-coverflow",
+        keyOf = { it.key },
+        titleOf = { it.title },
+        subtitleOf = { it.subtitle },
+        artworkOf = { it.artworkUri },
+        onActivate = { item, _ ->
+            when (item) {
+                is OnlineCoverItem.CollectionItem -> {
+                    navigate(OnlinePlace.Collection(item.summary.id, item.summary.title, item.summary.isAlbum))
+                }
+                is OnlineCoverItem.SongItem -> {
+                    val idx = allSongs.indexOfFirst { it.id == item.track.id }
+                    if (idx >= 0) {
+                        actions.play(allSongs, idx, "Online Cover Flow")
+                    } else {
+                        actions.playAlone(item.track)
+                    }
+                }
+            }
+        },
+        onLongPress = { item, _ ->
+            when (item) {
+                is OnlineCoverItem.CollectionItem -> showPlaylistMenu(overlayHost, item.summary, repository, actions, scope, navigate)
+                is OnlineCoverItem.SongItem -> showTrackMenu(overlayHost, item.track, repository, actions, scope, navigate)
+            }
+        },
+        emptySymbol = PodiumSymbol.Album,
+        emptyTitle = "No covers yet",
+        emptyMessage = "Browse or search Online, and albums and songs will appear here.",
+    )
+}

@@ -5,6 +5,8 @@
          platform's cleartext switch agree since the user-server sources were retired). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Podium's own updates (D-99): a release downloaded from GitHub, handed to Android's installer
          (which asks the listener to confirm) once it's checked to be this app, signed by the same key. -->
@@ -19,7 +21,7 @@
     <application
         android:name=".PodiumApplication"
         android:allowBackup="false"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
         android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="Podium"

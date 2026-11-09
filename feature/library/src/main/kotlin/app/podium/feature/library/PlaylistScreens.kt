@@ -148,6 +148,7 @@ fun PlaylistScreen(
     val latest by rememberUpdatedState(placed)
     val overlay = LocalOverlayHost.current
     val picker = LocalPlaylistPicker.current
+    val editor = LocalSongEditorHost.current
     val haptics = rememberPodiumHaptics()
 
     // Wheel move mode, as in Up Next: the song lifts, turning carries it, Center sets it down.
@@ -224,6 +225,9 @@ fun PlaylistScreen(
                         add(MenuAction("Play next") { onPlayNext(track) })
                         add(MenuAction("Add to Up Next") { onAddToQueue(track) })
                         if (picker != null) add(MenuAction("Add to playlist") { picker.show(overlay, listOf(track.id)) })
+                        if (editor != null && track.source.sourceId.value == "local") {
+                            add(MenuAction("Edit song info") { editor.editSong(track) })
+                        }
                     },
                 ),
             )

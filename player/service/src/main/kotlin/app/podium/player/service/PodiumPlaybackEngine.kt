@@ -130,8 +130,19 @@ class PodiumPlaybackEngine(
     var lastError: PodiumError? = null
         private set
 
+    private val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+        .setUserAgent("Podium/1.0")
+        .setAllowCrossProtocolRedirects(true)
+        .setConnectTimeoutMs(12_000)
+        .setReadTimeoutMs(15_000)
+
     private val mediaSourceFactory: MediaSource.Factory =
-        DefaultMediaSourceFactory(ResolvingDataSource.Factory(DefaultDataSource.Factory(context), QueueDataSpecResolver()))
+        DefaultMediaSourceFactory(
+            ResolvingDataSource.Factory(
+                DefaultDataSource.Factory(context, httpDataSourceFactory),
+                QueueDataSpecResolver(),
+            ),
+        )
 
     /** Settings ▸ Equaliser (D-76), in each player's own audio path. */
     private val equalizer = EqualizerProcessor()
@@ -760,7 +771,8 @@ class PodiumPlaybackEngine(
      * where it was.
      */
     private fun matchStreamKind(uid: QueueUid, selection: Selection) {
-        if (queue.item(uid)?.track?.kind == app.podium.core.model.MediaKind.LIVE) return
+        val itemTrack = queue.item(uid)?.track
+        if (itemTrack?.kind == app.podium.core.model.MediaKind.LIVE && itemTrack.source.sourceId.value != "radio") return
         val index = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == uid.value } ?: return
         val held = player.getMediaItemAt(index)
         if (QueueMediaItems.fits(held.localConfiguration?.uri ?: return, selection)) return
@@ -786,9 +798,11 @@ class PodiumPlaybackEngine(
                 ?: throw PodiumResolveException(null, "Route ${selection.target::class.simpleName} needs another engine")
             // A manifest read as a file (or the other way round) would fail as bad media, and a stream
             // from another source than the item was rebuilt for isn't the one it started loading: the
-            // item is rebuilt for its stream instead (D-91, D-92). Live stations are always built as
-            // live HLS (D-90).
-            if (!QueueMediaItems.fits(dataSpec.uri, selection) && queue.item(uid)?.track?.kind != app.podium.core.model.MediaKind.LIVE) {
+            // item is rebuilt for its stream instead (D-91, D-92). Non-radio live stations are always
+            // built as live HLS (D-90).
+            val itemTrack = queue.item(uid)?.track
+            val isFixedLiveHls = itemTrack?.kind == app.podium.core.model.MediaKind.LIVE && itemTrack.source.sourceId.value != "radio"
+            if (!QueueMediaItems.fits(dataSpec.uri, selection) && !isFixedLiveHls) {
                 throw PodiumReopenException(uid, StreamKind.of(target.media))
             }
             return open(dataSpec, target)
@@ -796,8 +810,9 @@ class PodiumPlaybackEngine(
 
         private fun open(dataSpec: DataSpec, target: PlaybackTarget.DirectStream): DataSpec {
             // The platform allows cleartext only so the listener's own server can be reached; every
-            // source is held to that here, whatever it hands over (D-09). A per-item refusal.
-            if (!NetworkPolicy.permits(target.media.uri)) {
+            // source is held to that here, whatever it hands over (D-09), except public Icecast/Shoutcast
+            // FM radio streams which frequently broadcast over plain HTTP.
+            if (!NetworkPolicy.permits(target.media.uri) && target.media.sourceId.value != "radio") {
                 throw PodiumResolveException(HealthOutcome.INVALID_MEDIA, "Refused an unencrypted stream off the listener's network")
             }
             return dataSpec.withUri(Uri.parse(target.media.uri)).withAdditionalHeaders(target.media.headers)

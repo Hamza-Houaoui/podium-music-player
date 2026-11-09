@@ -152,9 +152,13 @@ import app.podium.feature.library.ArtistsScreen
 import app.podium.feature.library.CoverFlowScreen
 import app.podium.feature.library.FavoritesScreen
 import app.podium.feature.library.HomeScreen
+import app.podium.feature.library.LibraryAlbum
+import app.podium.feature.library.LibraryArtist
 import app.podium.feature.library.LibraryIndex
 import app.podium.feature.library.LibraryState
 import app.podium.feature.library.LocalPlaylistPicker
+import app.podium.feature.library.LocalSongEditor
+import app.podium.feature.library.LocalSongEditorHost
 import app.podium.feature.library.MusicScreen
 import app.podium.feature.library.NamePlaylistScreen
 import app.podium.feature.library.PlaylistKeys
@@ -294,13 +298,30 @@ sealed interface Dest {
 
     /** A place in the ONLINE section (D-34). */
     data class Online(val place: OnlinePlace) : Dest
+
+    /** Listen Together: local-network synchronized listening, 4-digit tumbler code, and IP entry. */
+    data object ListenTogether : Dest
+    data class JoinTogetherCode(val host: String, val port: Int, val name: String) : Dest
+    data object JoinTogetherAddress : Dest
+
+    /** Online Radio (curated Tunisian FM + worldwide Radio Browser directory). */
+    data class Radio(val place: app.podium.radio.RadioPlace = app.podium.radio.RadioPlace.Menu) : Dest
+
+    /** Offline downloaded songs, artwork, and Smart Downloads. */
+    data object Downloads : Dest
+    data object DownloadsCoverFlow : Dest
+
+    /** Local music metadata and lyrics editors. */
+    data class EditLocalSong(val trackId: TrackId) : Dest
+    data class EditLocalAlbum(val albumId: AlbumId, val currentTitle: String, val currentArtist: String) : Dest
+    data class EditLocalArtist(val artistId: ArtistId, val currentName: String) : Dest
 }
 
 private val fixedDests = listOf(
     Dest.Home, Dest.Music, Dest.CoverFlow, Dest.Albums, Dest.Artists, Dest.Songs, Dest.Favorites, Dest.Playlists, Dest.NowPlaying,
     Dest.UpNext, Dest.Lyrics, Dest.Settings, Dest.Appearance, Dest.DeviceBody, Dest.VirtualDisplay, Dest.Theme, Dest.Font,
     Dest.LyricsFont, Dest.LyricsTheme, Dest.Background, Dest.Finish, Dest.CustomColor, Dest.DisplayColor, Dest.OnlineSources, Dest.OnlineChannel, Dest.Equalizer,
-    Dest.CustomSources, Dest.AddCustomSource,
+    Dest.CustomSources, Dest.AddCustomSource, Dest.ListenTogether, Dest.JoinTogetherAddress, Dest.Downloads, Dest.DownloadsCoverFlow,
 ).associateBy { it.toString() }
 
 private fun Dest.encode(): String = when (this) {
@@ -308,6 +329,7 @@ private fun Dest.encode(): String = when (this) {
     is Dest.Artist -> "Artist:${id.value}"
     is Dest.MusicFolders -> "MusicFolders:$path"
     is Dest.Online -> "Online:" + OnlinePlace.encode(place)
+    is Dest.Radio -> "Radio:" + app.podium.radio.RadioPlace.encode(place)
     is Dest.Level -> "Level:${level.name}"
     is Dest.EqualizerBand -> "EqualizerBand:$band"
     is Dest.CustomSource -> "CustomSource:$id"
@@ -315,6 +337,10 @@ private fun Dest.encode(): String = when (this) {
     is Dest.Playlist -> "Playlist:$id\u0000$name"
     is Dest.AddSongs -> "AddSongs:$playlistId"
     is Dest.NamePlaylist -> "NamePlaylist:${playlistId.orEmpty()}\u0000$currentName"
+    is Dest.JoinTogetherCode -> "JoinTogetherCode:$host\u0000$port\u0000$name"
+    is Dest.EditLocalSong -> "EditLocalSong:${trackId.value}"
+    is Dest.EditLocalAlbum -> "EditLocalAlbum:${albumId.value}\u0000$currentTitle\u0000$currentArtist"
+    is Dest.EditLocalArtist -> "EditLocalArtist:${artistId.value}\u0000$currentName"
     else -> toString()
 }
 
@@ -323,6 +349,7 @@ private fun decodeDest(text: String): Dest? = when {
     text.startsWith("Artist:") -> Dest.Artist(ArtistId(text.removePrefix("Artist:")))
     text.startsWith("MusicFolders:") -> Dest.MusicFolders(text.removePrefix("MusicFolders:"))
     text.startsWith("Online:") -> OnlinePlace.decode(text.removePrefix("Online:"))?.let(Dest::Online)
+    text.startsWith("Radio:") -> app.podium.radio.RadioPlace.decode(text.removePrefix("Radio:"))?.let(Dest::Radio)
     text.startsWith("Level:") -> AppearanceLevel.entries.firstOrNull { it.name == text.removePrefix("Level:") }?.let(Dest::Level)
     text.startsWith("EqualizerBand:") -> text.removePrefix("EqualizerBand:").toIntOrNull()
         ?.takeIf { it in app.podium.player.api.EqualizerSettings.BANDS_HZ.indices }?.let(Dest::EqualizerBand)
@@ -334,6 +361,13 @@ private fun decodeDest(text: String): Dest? = when {
     text.startsWith("AddSongs:") -> Dest.AddSongs(text.removePrefix("AddSongs:"))
     text.startsWith("NamePlaylist:") -> text.removePrefix("NamePlaylist:").split('\u0000', limit = 2).takeIf { it.size == 2 }
         ?.let { (id, name) -> Dest.NamePlaylist(id.ifEmpty { null }, name) }
+    text.startsWith("JoinTogetherCode:") -> text.removePrefix("JoinTogetherCode:").split('\u0000', limit = 3).takeIf { it.size == 3 }
+        ?.let { (h, p, n) -> p.toIntOrNull()?.let { port -> Dest.JoinTogetherCode(h, port, n) } }
+    text.startsWith("EditLocalSong:") -> Dest.EditLocalSong(TrackId(text.removePrefix("EditLocalSong:")))
+    text.startsWith("EditLocalAlbum:") -> text.removePrefix("EditLocalAlbum:").split('\u0000', limit = 3).takeIf { it.size == 3 }
+        ?.let { (id, t, a) -> Dest.EditLocalAlbum(AlbumId(id), t, a) }
+    text.startsWith("EditLocalArtist:") -> text.removePrefix("EditLocalArtist:").split('\u0000', limit = 2).takeIf { it.size == 2 }
+        ?.let { (id, n) -> Dest.EditLocalArtist(ArtistId(id), n) }
     else -> fixedDests[text]
 }
 
@@ -391,6 +425,15 @@ private fun titleOf(dest: Dest, graph: AppGraph): String = when (dest) {
         val artist by remember(dest) { graph.library.artist(dest.id) }.collectAsStateWithLifecycle(initialValue = null)
         artist?.artist?.name ?: "Artist"
     }
+    Dest.ListenTogether -> "Listen together"
+    is Dest.JoinTogetherCode -> "Session code"
+    Dest.JoinTogetherAddress -> "Host address"
+    is Dest.Radio -> dest.place.title
+    Dest.Downloads -> "Downloads"
+    Dest.DownloadsCoverFlow -> "Cover Flow"
+    is Dest.EditLocalSong -> "Edit song"
+    is Dest.EditLocalAlbum -> "Edit album"
+    is Dest.EditLocalArtist -> "Edit artist"
 }
 
 /**
@@ -470,6 +513,19 @@ fun PodiumApp(graph: AppGraph, onSourceAction: (CapabilityAction) -> Unit, onTur
         val haptics = remember(hapticEngine, feedback) { PodiumHaptics(hapticEngine, feedback) }
         // Add to playlist (D-106), from the library's song menus and Now Playing.
         val playlistPicker = remember(navigator, haptics) { PlaylistPicker(graph.playlists, haptics, graph.appScope) { navigator.push(Dest.NamePlaylist()) } }
+        val localSongEditor = remember(navigator) {
+            object : LocalSongEditor {
+                override fun editSong(track: Track) {
+                    navigator.push(Dest.EditLocalSong(track.id))
+                }
+                override fun editAlbum(album: LibraryAlbum) {
+                    navigator.push(Dest.EditLocalAlbum(album.id, album.title, album.artist))
+                }
+                override fun editArtist(artist: LibraryArtist) {
+                    navigator.push(Dest.EditLocalArtist(artist.id, artist.name))
+                }
+            }
+        }
         val scope = rememberCoroutineScope()
 
         SystemBarIcons(darkIcons = palette.isLight)
@@ -558,6 +614,7 @@ fun PodiumApp(graph: AppGraph, onSourceAction: (CapabilityAction) -> Unit, onTur
             LocalOverlayHost provides overlay,
             LocalImmersiveHost provides immersive,
             LocalPlaylistPicker provides playlistPicker,
+            LocalSongEditorHost provides localSongEditor,
             LocalArtworkLoader provides graph.artworkLoader,
             LocalFeedback provides feedback,
             LocalHapticEngine provides hapticEngine,
@@ -993,6 +1050,22 @@ private fun PreviousColumn(previous: Dest, current: Dest, graph: AppGraph, navig
         Dest.CustomSources -> "CustomSources"
         is Dest.CustomSource -> current.id
         is Dest.CustomSourceOption -> "Option:${current.key}"
+        Dest.ListenTogether -> "Listen together"
+        is Dest.JoinTogetherCode -> if (previous == Dest.ListenTogether) "nearby:${current.host}:${current.port}" else "JoinTogetherCode"
+        Dest.JoinTogetherAddress -> "join-address"
+        is Dest.Radio -> when (val p = current.place) {
+            app.podium.radio.RadioPlace.Menu -> "Radio"
+            app.podium.radio.RadioPlace.CoverFlow -> "cover-flow"
+            is app.podium.radio.RadioPlace.Category -> "cat:${p.category.name}"
+            app.podium.radio.RadioPlace.Search -> "search"
+            app.podium.radio.RadioPlace.AddCustom -> "add-custom"
+            is app.podium.radio.RadioPlace.EditStation -> "edit:${p.stationId}"
+        }
+        Dest.Downloads -> "Downloads"
+        Dest.DownloadsCoverFlow -> "DownloadsCoverFlow"
+        is Dest.EditLocalSong -> current.trackId.value
+        is Dest.EditLocalAlbum -> current.albumId.value
+        is Dest.EditLocalArtist -> current.artistId.value
         else -> titleOf(current, graph)
     }
     val backLabel = "Back to ${titleOf(previous, graph)}"
@@ -1028,19 +1101,20 @@ private fun Dest.atmosphereLevel(): Float = when (this) {
     Dest.NowPlaying -> 1f
     Dest.Lyrics -> 0f
     Dest.UpNext -> 0.6f
-    Dest.Home, Dest.Music, Dest.CoverFlow -> 0.55f
+    Dest.Home, Dest.Music, Dest.CoverFlow, Dest.DownloadsCoverFlow, Dest.ListenTogether -> 0.55f
     Dest.Albums, Dest.Artists, Dest.Songs, Dest.Favorites, Dest.Playlists, is Dest.Playlist, is Dest.AddSongs,
-    is Dest.Album, is Dest.Artist, is Dest.Online -> 0.4f
+    is Dest.Album, is Dest.Artist, is Dest.Online, is Dest.Radio, Dest.Downloads -> 0.4f
     else -> 0.22f
 }
 
-private val MiniPlayerScreens = setOf(Dest.Home, Dest.Music, Dest.Albums, Dest.Artists, Dest.Songs, Dest.Favorites, Dest.Playlists)
+private val MiniPlayerScreens = setOf(Dest.Home, Dest.Music, Dest.Albums, Dest.Artists, Dest.Songs, Dest.Favorites, Dest.Playlists, Dest.ListenTogether, Dest.Downloads)
 
 /** How far out of focus a full-display moment puts what's behind it: twice a menu's (D-104). */
 private const val ImmersiveDefocus = 2f
 
 private fun Dest.showsMiniPlayer() = this in MiniPlayerScreens || this is Dest.Album || this is Dest.Artist || this is Dest.Playlist || this is Dest.AddSongs ||
-    (this is Dest.Online && place !is OnlinePlace.Search && place !is OnlinePlace.NamePlaylist)
+    (this is Dest.Online && place !is OnlinePlace.Search && place !is OnlinePlace.NamePlaylist && place !is OnlinePlace.CoverFlow) ||
+    (this is Dest.Radio && place !is app.podium.radio.RadioPlace.Search && place !is app.podium.radio.RadioPlace.AddCustom && place !is app.podium.radio.RadioPlace.EditStation && place !is app.podium.radio.RadioPlace.CoverFlow)
 
 @Composable
 private fun ScreenContent(
@@ -1065,6 +1139,13 @@ private fun ScreenContent(
     when (screen) {
         Dest.Home -> {
             val snapshot by controller.snapshot.collectAsStateWithLifecycle()
+            val togetherState by graph.together.state.collectAsStateWithLifecycle()
+            val togetherValue = when (val ts = togetherState) {
+                is app.podium.together.TogetherState.Hosting -> "Code ${ts.code}"
+                is app.podium.together.TogetherState.Guest -> ts.hostName
+                is app.podium.together.TogetherState.Joining -> "Joining"
+                app.podium.together.TogetherState.Idle -> null
+            }
             HomeScreen(
                 repository = graph.library,
                 nowPlayingArtwork = snapshot.item?.artworkUri,
@@ -1081,26 +1162,42 @@ private fun ScreenContent(
                 onSettings = { navigator.push(Dest.Settings) },
                 onOnline = if (onlineStatus != null) ({ navigator.push(Dest.Online(OnlinePlace.Menu)) }) else null,
                 onlineArtwork = onlineRecent.mapNotNull { it.artwork?.uri }.distinct().take(10),
+                onRadio = { navigator.push(Dest.Radio(app.podium.radio.RadioPlace.Menu)) },
+                onListenTogether = { navigator.push(Dest.ListenTogether) },
+                listenTogetherValue = togetherValue,
                 onSourceAction = onSourceAction,
             )
         }
-        Dest.Music -> MusicScreen(
-            repository = graph.library,
-            favorites = graph.localFavorites,
-            onCoverFlow = { navigator.push(Dest.CoverFlow) },
-            onAlbums = { navigator.push(Dest.Albums) },
-            onArtists = { navigator.push(Dest.Artists) },
-            onSongs = { navigator.push(Dest.Songs) },
-            onFavorites = { navigator.push(Dest.Favorites) },
-            onSourceAction = onSourceAction,
-            playlists = graph.playlists,
-            onPlaylists = { navigator.push(Dest.Playlists) },
-        )
+        Dest.Music -> {
+            val completedDownloads by graph.downloads.completedTracks.collectAsStateWithLifecycle()
+            MusicScreen(
+                repository = graph.library,
+                favorites = graph.localFavorites,
+                onCoverFlow = { navigator.push(Dest.CoverFlow) },
+                onAlbums = { navigator.push(Dest.Albums) },
+                onArtists = { navigator.push(Dest.Artists) },
+                onSongs = { navigator.push(Dest.Songs) },
+                onFavorites = { navigator.push(Dest.Favorites) },
+                onSourceAction = onSourceAction,
+                playlists = graph.playlists,
+                onPlaylists = { navigator.push(Dest.Playlists) },
+                onDownloads = { navigator.push(Dest.Downloads) },
+                downloadsValue = completedDownloads.size.takeIf { it > 0 }?.toString(),
+                downloadsArtwork = completedDownloads.mapNotNull { it.artwork?.uri }.distinct().take(8),
+            )
+        }
         Dest.CoverFlow -> CoverFlowScreen(graph.library, onOpen = { navigator.push(Dest.Album(it)) })
         Dest.Albums -> AlbumsScreen(graph.library, onOpen = { navigator.push(Dest.Album(it)) })
         Dest.Artists -> ArtistsScreen(graph.library, onOpen = { navigator.push(Dest.Artist(it)) })
         is Dest.Album -> AlbumScreen(graph.library, screen.id, onPlay = play, onPlayNext = playNext, onAddToQueue = addToQueue)
-        is Dest.Artist -> ArtistScreen(graph.library, screen.id, onOpenAlbum = { navigator.push(Dest.Album(it)) }, onPlay = play)
+        is Dest.Artist -> ArtistScreen(
+            graph.library,
+            screen.id,
+            onOpenAlbum = { navigator.push(Dest.Album(it)) },
+            onPlay = play,
+            onPlayNext = playNext,
+            onAddToQueue = addToQueue,
+        )
         Dest.Favorites -> FavoritesScreen(graph.library, graph.localFavorites, onPlay = play, onPlayNext = playNext, onAddToQueue = addToQueue)
         Dest.Playlists -> PlaylistsScreen(
             graph.playlists,
@@ -1145,7 +1242,14 @@ private fun ScreenContent(
             graph.volume,
             graph.favorites,
             onUpNext = { navigator.push(Dest.UpNext) },
-            environmentOf = { id -> if (graph.environments.isOnline(id)) "Online" else null },
+            environmentOf = { id ->
+                when {
+                    id.sourceId == app.podium.radio.RadioStation.RADIO_SOURCE_ID -> "Radio"
+                    graph.downloads.isDownloaded(id) -> "Downloaded"
+                    graph.environments.isOnline(id) -> "Online"
+                    else -> null
+                }
+            },
             // A song of the library goes into one of its playlists (D-106); an online song into one of
             // ONLINE's own (D-109). The two environments never share a playlist (D-34).
             onAddToPlaylist = LocalPlaylistPicker.current?.let { picker -> { id -> if (!graph.environments.isOnline(id)) picker.show(overlay, listOf(id)) } },
@@ -1160,6 +1264,11 @@ private fun ScreenContent(
             // Settings ▸ Now Playing's tray (D-108) and Settings ▸ Now Playing (D-109).
             autoHideTray = graph.deviceSettings.hideNowPlayingTray.collectAsStateWithLifecycle().value,
             nostalgic = graph.deviceSettings.nostalgicNowPlaying.collectAsStateWithLifecycle().value,
+            isDownloaded = { id -> graph.downloads.isDownloaded(id) },
+            isDownloading = { id -> graph.downloads.isDownloading(id) },
+            onDownload = { track -> graph.downloads.download(track) },
+            onRemoveDownload = { id -> graph.downloads.remove(id) },
+            onEditSong = { track -> navigator.push(Dest.EditLocalSong(track.id)) },
             // Each page in the song's own environment (D-34): the library's, or online's.
             onOpenAlbum = { track ->
                 val album = track.album
@@ -1201,6 +1310,8 @@ private fun ScreenContent(
             onSleepTimer = { overlay.show(sleepTimerMenu(graph.sleepTimer)) },
             customSources = graph.customSources,
             onCustomSources = { navigator.push(Dest.CustomSources) },
+            smartDownloads = graph.downloads.smartDownloadsEnabled,
+            onSetSmartDownloads = { graph.downloads.setSmartDownloads(it) },
             softwareUpdate = remember(graph) { app.podium.update.SoftwareUpdate(graph.updates, checksByItself = !BuildConfig.DEBUG) },
         )
         Dest.Equalizer -> app.podium.feature.settings.EqualizerScreen(settings, onBand = { navigator.push(Dest.EqualizerBand(it)) })
@@ -1271,6 +1382,65 @@ private fun ScreenContent(
         Dest.CustomColor -> CustomColorScreen(settings)
         Dest.DisplayColor -> CustomColorScreen(settings, ColorTarget.DisplayBackground)
         is Dest.Level -> LevelScreen(settings, screen.level)
+        Dest.ListenTogether -> app.podium.together.ListenTogetherScreen(
+            together = graph.together,
+            controller = controller,
+            onJoinSession = { host, port, name -> navigator.push(Dest.JoinTogetherCode(host, port, name)) },
+            onJoinByAddress = { navigator.push(Dest.JoinTogetherAddress) },
+            onOpenNowPlaying = navigator::showNowPlaying,
+            onFindSongs = { navigator.push(Dest.Online(OnlinePlace.Search)) },
+        )
+        is Dest.JoinTogetherCode -> app.podium.together.JoinTogetherCodeScreen(
+            host = screen.host,
+            port = screen.port,
+            hostName = screen.name,
+            together = graph.together,
+            onJoined = { navigator.popTo(Dest.ListenTogether) },
+        )
+        Dest.JoinTogetherAddress -> app.podium.together.JoinTogetherAddressScreen(
+            onContinueToCode = { host, port -> navigator.push(Dest.JoinTogetherCode(host, port, host)) },
+        )
+        is Dest.Radio -> app.podium.radio.RadioScreen(
+            place = screen.place,
+            repository = graph.radioRepository,
+            catalog = graph.catalog,
+            controller = controller,
+            navigate = { navigator.push(Dest.Radio(it)) },
+            onOpenNowPlaying = navigator::showNowPlaying,
+            onBack = { navigator.pop() },
+        )
+        Dest.Downloads -> app.podium.downloads.DownloadsScreen(
+            downloads = graph.downloads,
+            catalog = graph.catalog,
+            controller = controller,
+            onOpenNowPlaying = navigator::showNowPlaying,
+            onFindSongs = { navigator.push(Dest.Online(OnlinePlace.Search)) },
+            onCoverFlow = { navigator.push(Dest.DownloadsCoverFlow) },
+        )
+        Dest.DownloadsCoverFlow -> app.podium.downloads.DownloadsCoverFlowScreen(
+            downloads = graph.downloads,
+            catalog = graph.catalog,
+            controller = controller,
+            onOpenNowPlaying = navigator::showNowPlaying,
+        )
+        is Dest.EditLocalSong -> EditLocalSongScreen(
+            graph = graph,
+            trackId = screen.trackId,
+            onDone = { navigator.pop() },
+        )
+        is Dest.EditLocalAlbum -> EditLocalAlbumScreen(
+            graph = graph,
+            albumId = screen.albumId,
+            initialTitle = screen.currentTitle,
+            initialArtist = screen.currentArtist,
+            onDone = { navigator.pop() },
+        )
+        is Dest.EditLocalArtist -> EditLocalArtistScreen(
+            graph = graph,
+            artistId = screen.artistId,
+            initialName = screen.currentName,
+            onDone = { navigator.pop() },
+        )
     }
 }
 
@@ -1589,12 +1759,20 @@ private fun rememberOnlineActions(graph: AppGraph, navigator: Navigator): Online
 
             override fun playNext(track: Track) {
                 graph.catalog.remember(listOf(track))
-                controller.playNext(listOf(track.id))
+                if (graph.together.isGuest) {
+                    graph.together.suggest(track, next = true)
+                } else {
+                    controller.playNext(listOf(track.id))
+                }
             }
 
             override fun addToQueue(track: Track) {
                 graph.catalog.remember(listOf(track))
-                controller.addToQueue(listOf(track.id))
+                if (graph.together.isGuest) {
+                    graph.together.suggest(track, next = false)
+                } else {
+                    controller.addToQueue(listOf(track.id))
+                }
             }
 
             override fun playAlone(track: Track) {
@@ -1665,6 +1843,38 @@ private fun rememberOnlineActions(graph: AppGraph, navigator: Navigator): Online
             override val nowPlaying: StateFlow<Track?> = controller.snapshot
                 .map { snap -> snap.item?.trackId?.takeIf { graph.environments.isOnline(it) }?.let { graph.catalog.cached(it) } }
                 .stateIn(scope, SharingStarted.Eagerly, null)
+
+            override fun isDownloaded(trackId: TrackId): Boolean = graph.downloads.isDownloaded(trackId)
+            override fun isDownloading(trackId: TrackId): Boolean = graph.downloads.isDownloading(trackId)
+            override fun download(track: Track) = graph.downloads.download(track)
+            override fun downloadAll(tracks: List<Track>) = graph.downloads.downloadAll(tracks)
+            override fun downloadCollection(id: PlaylistId) {
+                graph.appScope.launch {
+                    val tracks = (graph.online.collection(id) as? Outcome.Success)?.value?.tracks
+                        ?.filter { it.availability !is app.podium.core.model.Availability.Unavailable }.orEmpty()
+                    if (tracks.isNotEmpty()) graph.downloads.downloadAll(tracks)
+                }
+            }
+            override fun downloadArtist(id: ArtistId) {
+                graph.appScope.launch {
+                    val tracks = (graph.online.artist(id) as? Outcome.Success)?.value?.tracks
+                        ?.filter { it.availability !is app.podium.core.model.Availability.Unavailable }.orEmpty()
+                    if (tracks.isNotEmpty()) graph.downloads.downloadAll(tracks)
+                }
+            }
+            override fun downloadMyPlaylist(id: String) {
+                graph.appScope.launch {
+                    val contents = graph.online.playlist(id).first() ?: return@launch
+                    val tracks = contents.entries.map { it.track }
+                        .filter { it.availability !is app.podium.core.model.Availability.Unavailable }
+                    if (tracks.isNotEmpty()) graph.downloads.downloadAll(tracks)
+                }
+            }
+            override fun removeDownload(trackId: TrackId) = graph.downloads.remove(trackId)
+            override fun openDownloads() = navigator.push(Dest.Downloads)
+            override val downloadsCount: StateFlow<Int> = graph.downloads.completedTracks
+                .map { it.size }
+                .stateIn(scope, SharingStarted.Eagerly, 0)
         }
     }
 }

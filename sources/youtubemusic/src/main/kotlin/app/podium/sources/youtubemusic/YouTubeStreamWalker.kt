@@ -124,6 +124,7 @@ internal class YouTubeStreamWalker(
     private val visitorLock = Mutex()
     @Volatile private var visitor: String? = null
     @Volatile private var visitorAt = 0L
+    private val premiumBackoff = PremiumBackoff(now)
 
     /** The order the apps are asked in now. */
     fun order(): List<String> {
@@ -139,7 +140,17 @@ internal class YouTubeStreamWalker(
         val started = now()
         val signedIn = runCatching { session() }.getOrNull()
         val decided = withTimeoutOrNull(budgetMillis) {
-            for (identity in order.toList() + lastResort) {
+            val sequence = order.toList() + lastResort
+            if (signedIn != null && scripts != null && premiumBackoff.asking() &&
+                sequence.firstOrNull()?.needsSession == false &&
+                PlayerIdentities.WEB_REMIX_SIGNED_IN in sequence &&
+                PlayerIdentities.WEB_REMIX_SIGNED_IN.key !in StreamWalkDebug.skipped
+            ) {
+                premium(PlayerIdentities.WEB_REMIX_SIGNED_IN, videoId, signedIn)?.let { stream ->
+                    return@withTimeoutOrNull Result.Found(stream)
+                }
+            }
+            for (identity in sequence) {
                 if (identity.key in StreamWalkDebug.skipped) {
                     StreamWalkDebug.note { "walk $videoId ${identity.key}: skipped (debug)" }
                     continue
@@ -282,6 +293,53 @@ internal class YouTubeStreamWalker(
     }
 
     // --- One app -----------------------------------------------------------------------------------------
+
+    /**
+     * Signed-in Music Premium check: asks [identity] for 256 kbps Premium streams ([PREMIUM_ITAGS]:
+     * Opus 774, AAC 141). When the account has none (a free account, or an upload/video), it stops
+     * before running the script solver or network probes, and after [PremiumBackoff.MISSES_TO_PAUSE]
+     * songs in a row without them it pauses for [PremiumBackoff.PAUSE_MS] so the fast unsigned path
+     * runs without waiting.
+     */
+    private suspend fun premium(identity: PlayerIdentity, videoId: String, signedIn: StreamSession): Stream? {
+        val player = scripts?.current() ?: return null
+        val agent = if (identity.usesSessionAgent) signedIn.userAgent else identity.userAgent
+        val response = try {
+            http.post(
+                playerUrl(identity),
+                headers(identity, null, agent, signedIn),
+                playerBody(identity, null, videoId, player.signatureTimestamp, signedIn.pageId),
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: IOException) {
+            return null
+        }
+        if (response.code !in 200..299) return null
+        val json = runCatching { Json.parseToJsonElement(response.body.decodeToString()) as? JsonObject }.getOrNull() ?: return null
+        if (json.obj("playabilityStatus")?.str("status") != "OK") return null
+        if (json.obj("videoDetails")?.str("videoId") != videoId) return null
+        val allFormats = formats(json, identity, agent)
+        val premiumFormats = allFormats.filter { it.stream.itag in PREMIUM_ITAGS }.take(PROBES_PER_APP)
+        if (premiumFormats.isEmpty()) {
+            if (allFormats.isNotEmpty() && premiumBackoff.missed()) {
+                StreamWalkDebug.note { "walk $videoId ${identity.key}: no Premium formats ${PremiumBackoff.MISSES_TO_PAUSE}x, pausing Premium check" }
+            }
+            return null
+        }
+        val solved = scripts.solve(player, premiumFormats.mapNotNull { it.n }.toSet(), premiumFormats.mapNotNull { it.s }.toSet()) ?: return null
+        val seen = Seen()
+        for (candidate in premiumFormats.mapNotNull { it.deciphered(solved) }) {
+            val code = check(candidate, identity, seen) ?: return null
+            if (code in 200..299) {
+                premiumBackoff.found()
+                servedBy(candidate)
+                StreamWalkDebug.note { "walk $videoId ${identity.key}: Premium stream itag ${candidate.itag} (${candidate.bitrateKbps} kbps)" }
+                return candidate
+            }
+        }
+        return null
+    }
 
     private suspend fun ask(identity: PlayerIdentity, videoId: String, signedIn: StreamSession?): Verdict {
         val started = now()
@@ -534,8 +592,17 @@ internal class YouTubeStreamWalker(
                 contentLength = f.str("contentLength")?.toLongOrNull()?.takeIf { it > 0 },
             ), s = cipher?.get("s"), sp = cipher?.get("sp"), n = if (identity.needsPlayerScript) param(url, "n")?.let(::decoded) else null)
         }.sortedWith(
-            compareBy<Format> { if (it.stream.codec == Codec.OPUS) 0 else if (it.stream.codec == Codec.AAC) 1 else 2 }
-                .thenByDescending { it.stream.bitrateKbps ?: 0 },
+            compareBy<Format> {
+                when (it.stream.itag) {
+                    774 -> 0
+                    141 -> 1
+                    else -> when (it.stream.codec) {
+                        Codec.OPUS -> 2
+                        Codec.AAC -> 3
+                        else -> 4
+                    }
+                }
+            }.thenByDescending { it.stream.bitrateKbps ?: 0 },
         )
     }
 
@@ -643,6 +710,9 @@ internal class YouTubeStreamWalker(
     internal companion object {
         const val VISITOR_URL = "https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false"
 
+        /** YouTube Music Premium 256 kbps audio formats: Opus (774) and AAC (141). */
+        val PREMIUM_ITAGS = setOf(774, 141)
+
         /** All the apps together, before the failsafe gets its turn (inside the source's own time). */
         const val WALK_BUDGET_MS = 12_000L
 
@@ -692,6 +762,35 @@ internal class YouTubeStreamWalker(
             val all = if (parts.any { it.substringBefore('=') == name }) replaced else parts + "$name=$encoded"
             return "$base?${all.joinToString("&")}"
         }
+    }
+}
+
+/**
+ * Premium quality's pause: answers without 256 kbps Premium formats are counted in a row, and only
+ * [MISSES_TO_PAUSE] of them (not a Premium account, most likely) pause asking first for [PAUSE_MS].
+ * A Premium answer starts the count again.
+ */
+internal class PremiumBackoff(private val now: () -> Long = System::currentTimeMillis) {
+    private var misses = 0
+    private var pausedUntil = 0L
+
+    @Synchronized fun asking(): Boolean = now() >= pausedUntil
+
+    /** One answer without Premium formats; true when it starts a pause. */
+    @Synchronized fun missed(): Boolean {
+        if (++misses < MISSES_TO_PAUSE) return false
+        misses = 0
+        pausedUntil = now() + PAUSE_MS
+        return true
+    }
+
+    @Synchronized fun found() {
+        misses = 0
+    }
+
+    companion object {
+        const val MISSES_TO_PAUSE = 3
+        const val PAUSE_MS = 60 * 60_000L
     }
 }
 

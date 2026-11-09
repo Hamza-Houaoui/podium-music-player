@@ -35,10 +35,12 @@ fun OnlineLibraryScreen(repository: OnlineRepository, actions: OnlineActions, na
     val status by repository.status.collectAsStateWithLifecycle()
     val liked by repository.likedTracks.collectAsStateWithLifecycle(initialValue = emptyList())
     val playlists by repository.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
+    val downloadsCount by actions.downloadsCount.collectAsStateWithLifecycle()
     val account = status?.account
     val canLibrary = status?.canLibrary == true
     val entries = buildList {
         add(OnlineEntry("Liked songs", if (liked.isEmpty()) MenuPreview.None else MenuPreview.Artwork(covers(liked)), value = liked.size.takeIf { it > 0 }?.toString()) { navigate(OnlinePlace.Liked) })
+        add(OnlineEntry("Downloads", MenuPreview.Instrument, value = downloadsCount.takeIf { it > 0 }?.toString()) { actions.openDownloads() })
         if (canLibrary) {
             add(OnlineEntry("Playlists", MenuPreview.None, leading = PodiumSymbol.PlaylistPlay) { navigate(OnlinePlace.LibraryPlaylists) })
             add(OnlineEntry("Albums", MenuPreview.None, leading = PodiumSymbol.Album) { navigate(OnlinePlace.LibraryAlbums) })
@@ -53,7 +55,9 @@ fun OnlineLibraryScreen(repository: OnlineRepository, actions: OnlineActions, na
 }
 
 @Composable
-fun OnlineLibraryPlaylistsScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Unit) =
+fun OnlineLibraryPlaylistsScreen(repository: OnlineRepository, actions: OnlineActions, navigate: (OnlinePlace) -> Unit) {
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
     PagedLibraryList(
         stateKey = "online-library-playlists",
         load = repository::libraryPlaylists,
@@ -61,10 +65,14 @@ fun OnlineLibraryPlaylistsScreen(repository: OnlineRepository, navigate: (Online
         empty = "No playlists yet" to "Playlists you make or save appear here.",
         preview = { MenuPreview.Artwork(listOfNotNull(it.artwork?.uri)) },
         onOpen = { navigate(OnlinePlace.Collection(it.id, it.title, it.isAlbum)) },
+        onLongPress = { showPlaylistMenu(overlayHost, it, repository, actions, scope, navigate) },
     ) { p, focused -> TrackRow(p.title, p.ownerName, focused, p.artwork?.uri, trailing = p.trackCount?.toString()) }
+}
 
 @Composable
-fun OnlineLibraryAlbumsScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Unit) =
+fun OnlineLibraryAlbumsScreen(repository: OnlineRepository, actions: OnlineActions, navigate: (OnlinePlace) -> Unit) {
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
     PagedLibraryList(
         stateKey = "online-library-albums",
         load = repository::libraryAlbums,
@@ -72,10 +80,14 @@ fun OnlineLibraryAlbumsScreen(repository: OnlineRepository, navigate: (OnlinePla
         empty = "No albums yet" to "Albums you save appear here.",
         preview = { MenuPreview.Artwork(listOfNotNull(it.artwork?.uri)) },
         onOpen = { navigate(OnlinePlace.Collection(PlaylistId(it.id.value), it.title, isAlbum = true)) },
+        onLongPress = { showAlbumMenu(overlayHost, it, repository, actions, scope, navigate) },
     ) { a, focused -> TrackRow(a.title, a.artistDisplay, focused, a.artwork?.uri, trailing = a.year?.toString()) }
+}
 
 @Composable
-fun OnlineLibraryArtistsScreen(repository: OnlineRepository, navigate: (OnlinePlace) -> Unit) =
+fun OnlineLibraryArtistsScreen(repository: OnlineRepository, actions: OnlineActions, navigate: (OnlinePlace) -> Unit) {
+    val overlayHost = overlay()
+    val scope = rememberCoroutineScope()
     PagedLibraryList(
         stateKey = "online-library-artists",
         load = repository::libraryArtists,
@@ -83,7 +95,9 @@ fun OnlineLibraryArtistsScreen(repository: OnlineRepository, navigate: (OnlinePl
         empty = "No artists yet" to "Artists of the songs you like appear here.",
         preview = { a -> a.artwork?.uri?.let { MenuPreview.Artwork(listOf(it), round = true) } ?: MenuPreview.None },
         onOpen = { navigate(OnlinePlace.Artist(it.id, it.name)) },
+        onLongPress = { showArtistMenu(overlayHost, it, repository, actions, scope, navigate) },
     ) { a, focused -> OnlineArtistRow(a, focused) }
+}
 
 /** A list read page by page from the account's library, on the paper. */
 @Composable
@@ -94,6 +108,7 @@ private fun <T> PagedLibraryList(
     empty: Pair<String, String>,
     preview: (T) -> MenuPreview,
     onOpen: (T) -> Unit,
+    onLongPress: (T) -> Unit = {},
     row: @Composable (T, Boolean) -> Unit,
 ) {
     val items = remember(stateKey) { mutableStateListOf<T>() }
@@ -121,7 +136,8 @@ private fun <T> PagedLibraryList(
     LaunchedEffect(stateKey) { loadMore() }
     val focus = rememberFocusListState(stateKey)
     val open: (Int) -> Unit = { i -> items.getOrNull(i)?.let(onOpen) }
-    ListInputEffect(focus, onActivate = open)
+    val longPress: (Int) -> Unit = { i -> items.getOrNull(i)?.let(onLongPress) }
+    ListInputEffect(focus, onActivate = open, onLongPress = longPress)
     PageNearEnd(focus, items.size, exhausted, loadMore)
     when (val s = state) {
         Remote.Loading -> LoadingScreen()
@@ -135,6 +151,7 @@ private fun <T> PagedLibraryList(
                 key = key,
                 contentPadding = LocalScreenInsets.current.listPadding(),
                 onActivate = open,
+                onLongPress = longPress,
                 preview = preview,
                 modifier = Modifier.fillMaxSize(),
             ) { item, _, focused -> row(item, focused) }

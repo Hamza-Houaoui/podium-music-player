@@ -286,13 +286,24 @@ internal open class YouTubeMusicStreamResolver(
 
     /**
      * Deterministic stream selection policy:
-     * 1. Prioritize WebM Opus (itag 251, ~160 kbps) for highest fidelity on Android.
-     * 2. Fallback to M4A AAC (itag 140, ~128 kbps).
-     * 3. Fallback to highest average bitrate audio stream available.
+     * 1. Prioritize YouTube Music Premium 256 kbps streams (Opus itag 774, AAC itag 141) when available.
+     * 2. Prioritize WebM Opus (itag 251, ~160 kbps) for highest standard fidelity on Android.
+     * 3. Fallback to M4A AAC (itag 140, ~128 kbps).
+     * 4. Fallback to highest average bitrate audio stream available.
      */
     internal fun selectStream(streams: List<AudioStream>, quality: QualityRequest): AudioStream? {
         val validStreams = streams.filter { !it.content.isNullOrBlank() }
         if (validStreams.isEmpty()) return null
+
+        val premiumOpus = validStreams.filter { it.itag == 774 }
+        if (premiumOpus.isNotEmpty()) {
+            return premiumOpus.maxByOrNull { it.averageBitrate } ?: premiumOpus.first()
+        }
+
+        val premiumAac = validStreams.filter { it.itag == 141 }
+        if (premiumAac.isNotEmpty()) {
+            return premiumAac.maxByOrNull { it.averageBitrate } ?: premiumAac.first()
+        }
 
         val opusStreams = validStreams.filter { it.format == MediaFormat.WEBMA_OPUS || it.itag == 251 }
         if (opusStreams.isNotEmpty()) {
@@ -320,10 +331,11 @@ internal open class YouTubeMusicStreamResolver(
     }
 
     private fun mapQuality(stream: AudioStream): AudioQuality {
-        val isOpus = stream.format == MediaFormat.WEBMA_OPUS || stream.itag == 251
+        val isOpus = stream.format == MediaFormat.WEBMA_OPUS || stream.itag == 251 || stream.itag == 774
         val codec = if (isOpus) Codec.OPUS else Codec.AAC
         val container = if (isOpus) "webm" else "m4a"
-        val bitrate = kbpsOf(stream.averageBitrate, stream.bitrate) ?: if (isOpus) 160 else 128
+        val defaultBitrate = if (stream.itag in YouTubeStreamWalker.PREMIUM_ITAGS) 256 else if (isOpus) 160 else 128
+        val bitrate = kbpsOf(stream.averageBitrate, stream.bitrate) ?: defaultBitrate
 
         return AudioQuality(
             codec = codec,

@@ -32,6 +32,7 @@ private sealed interface ArtistRow {
     data object Header : ArtistRow
     data object Radio : ArtistRow
     data object PlayAll : ArtistRow
+    data object DownloadAll : ArtistRow
     data class Section(val title: String) : ArtistRow
     data class Song(val track: Track, val index: Int) : ArtistRow
     data class Album(val album: AlbumSummary) : ArtistRow
@@ -58,7 +59,10 @@ fun OnlineArtistScreen(place: OnlinePlace.Artist, repository: OnlineRepository, 
         else buildList {
             add(ArtistRow.Header)
             if (canRelate) add(ArtistRow.Radio)
-            if (songs.isNotEmpty()) add(ArtistRow.PlayAll)
+            if (songs.isNotEmpty()) {
+                add(ArtistRow.PlayAll)
+                add(ArtistRow.DownloadAll)
+            }
             if (d.tracks.isNotEmpty()) {
                 add(ArtistRow.Section("Popular"))
                 d.tracks.take(10).forEachIndexed { i, t -> add(ArtistRow.Song(t, i)) }
@@ -83,6 +87,7 @@ fun OnlineArtistScreen(place: OnlinePlace.Artist, repository: OnlineRepository, 
         when (val row = rows.getOrNull(i)) {
             ArtistRow.Radio -> d?.let { actions.startArtistRadio(it.summary) }
             ArtistRow.PlayAll -> actions.play(songs, 0, place.name)
+            ArtistRow.DownloadAll -> actions.downloadAll(songs)
             is ArtistRow.Song -> songs.indexOfFirst { it.id == row.track.id }.takeIf { it >= 0 }?.let { actions.play(songs, it, place.name) }
             is ArtistRow.Album -> navigate(OnlinePlace.Collection(app.podium.core.model.PlaylistId(row.album.id.value), row.album.title, isAlbum = true))
             is ArtistRow.Playlist -> navigate(OnlinePlace.Collection(row.playlist.id, row.playlist.title, row.playlist.isAlbum))
@@ -91,7 +96,13 @@ fun OnlineArtistScreen(place: OnlinePlace.Artist, repository: OnlineRepository, 
         }
     }
     val longPress: (Int) -> Unit = { i ->
-        (rows.getOrNull(i) as? ArtistRow.Song)?.let { showTrackMenu(overlayHost, it.track, repository, actions, scope, navigate) }
+        when (val row = rows.getOrNull(i)) {
+            is ArtistRow.Song -> showTrackMenu(overlayHost, row.track, repository, actions, scope, navigate)
+            is ArtistRow.Album -> showAlbumMenu(overlayHost, row.album, repository, actions, scope, navigate)
+            is ArtistRow.Playlist -> showPlaylistMenu(overlayHost, row.playlist, repository, actions, scope, navigate)
+            is ArtistRow.Related -> showArtistMenu(overlayHost, row.artist, repository, actions, scope, navigate)
+            else -> Unit
+        }
     }
     ListInputEffect(focus, onActivate = activate, onLongPress = longPress)
     when (detail) {
@@ -114,6 +125,7 @@ fun OnlineArtistScreen(place: OnlinePlace.Artist, repository: OnlineRepository, 
                 ArtistRow.Header -> "header"
                 ArtistRow.Radio -> "radio"
                 ArtistRow.PlayAll -> "play"
+                ArtistRow.DownloadAll -> "download-all"
                 is ArtistRow.Section -> "section:${it.title}"
                 is ArtistRow.Song -> "song:${it.track.id.value}"
                 is ArtistRow.Album -> "album:${it.album.id.value}"
@@ -146,6 +158,7 @@ fun OnlineArtistScreen(place: OnlinePlace.Artist, repository: OnlineRepository, 
             )
             ArtistRow.Radio -> MenuRow("${artist.name} radio", focused, leading = PodiumSymbol.PlaylistPlay, showChevron = false)
             ArtistRow.PlayAll -> MenuRow("Play popular songs", focused, leading = PodiumSymbol.Play, showChevron = false)
+            ArtistRow.DownloadAll -> MenuRow("Download popular songs", focused, leading = PodiumSymbol.Queue, showChevron = false)
             is ArtistRow.Section -> SectionLabel(row.title)
             is ArtistRow.Song -> OnlineTrackRow(row.track, focused, liked = row.track.id in likedIds)
             is ArtistRow.Album -> TrackRow(row.album.title, row.album.year?.toString() ?: "Album", focused, row.album.artwork?.uri, trailing = row.album.trackCount?.toString())
@@ -160,6 +173,7 @@ private sealed interface CollectionRow {
     data class Artist(val name: String, val id: app.podium.core.model.ArtistId) : CollectionRow
     data object Play : CollectionRow
     data object Shuffle : CollectionRow
+    data object DownloadAll : CollectionRow
     data object Save : CollectionRow
     data class Song(val track: Track, val index: Int) : CollectionRow
 }
@@ -182,7 +196,7 @@ fun OnlineCollectionScreen(place: OnlinePlace.Collection, repository: OnlineRepo
     val rows = remember(d, artist) {
         if (d == null) emptyList()
         else listOf(CollectionRow.Header) + listOfNotNull(artist) +
-            (if (playable.isNotEmpty()) listOf(CollectionRow.Play, CollectionRow.Shuffle, CollectionRow.Save) else emptyList()) +
+            (if (playable.isNotEmpty()) listOf(CollectionRow.Play, CollectionRow.Shuffle, CollectionRow.DownloadAll, CollectionRow.Save) else emptyList()) +
             d.tracks.mapIndexed { i, t -> CollectionRow.Song(t, i) }
     }
     val focus = rememberFocusListState("online-collection:${place.id.value}")
@@ -193,13 +207,18 @@ fun OnlineCollectionScreen(place: OnlinePlace.Collection, repository: OnlineRepo
             // The whole album or playlist goes to whoever plays it, from the chosen song (§8.5).
             CollectionRow.Play -> actions.playCollection(playable, 0, label, place.id)
             CollectionRow.Shuffle -> actions.playCollection(playable, 0, label, place.id, shuffle = true)
+            CollectionRow.DownloadAll -> actions.downloadAll(playable)
             CollectionRow.Save -> showAddToPlaylist(overlayHost, playable, repository, scope, navigate = navigate)
             is CollectionRow.Song -> playable.indexOfFirst { it.id == row.track.id }.takeIf { it >= 0 }?.let { actions.playCollection(playable, it, label, place.id) }
             else -> Unit
         }
     }
     val longPress: (Int) -> Unit = { i ->
-        (rows.getOrNull(i) as? CollectionRow.Song)?.let { showTrackMenu(overlayHost, it.track, repository, actions, scope, navigate) }
+        when (val row = rows.getOrNull(i)) {
+            is CollectionRow.Song -> showTrackMenu(overlayHost, row.track, repository, actions, scope, navigate)
+            is CollectionRow.Artist -> showArtistMenu(overlayHost, ArtistSummary(row.id, row.name), repository, actions, scope, navigate)
+            else -> Unit
+        }
     }
     ListInputEffect(focus, onActivate = activate, onLongPress = longPress)
     when (detail) {
@@ -223,6 +242,7 @@ fun OnlineCollectionScreen(place: OnlinePlace.Collection, repository: OnlineRepo
                 is CollectionRow.Artist -> "artist"
                 CollectionRow.Play -> "play"
                 CollectionRow.Shuffle -> "shuffle"
+                CollectionRow.DownloadAll -> "download-all"
                 CollectionRow.Save -> "save"
                 is CollectionRow.Song -> "${it.track.id.value}#${it.index}"
             }
@@ -254,6 +274,7 @@ fun OnlineCollectionScreen(place: OnlinePlace.Collection, repository: OnlineRepo
             is CollectionRow.Artist -> MenuRow(row.name, focused, leading = PodiumSymbol.Person)
             CollectionRow.Play -> MenuRow("Play", focused, leading = PodiumSymbol.Play, showChevron = false)
             CollectionRow.Shuffle -> MenuRow("Shuffle", focused, leading = PodiumSymbol.Shuffle, showChevron = false)
+            CollectionRow.DownloadAll -> MenuRow("Download all", focused, leading = PodiumSymbol.Queue, showChevron = false)
             CollectionRow.Save -> MenuRow("Add all to a playlist", focused, leading = PodiumSymbol.Queue, showChevron = false)
             is CollectionRow.Song -> OnlineTrackRow(row.track, focused, liked = row.track.id in likedIds)
         }

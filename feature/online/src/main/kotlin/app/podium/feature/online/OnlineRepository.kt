@@ -159,4 +159,16 @@ interface OnlineActions {
 
     /** Sign in to the online account (opens the service's own sign-in page). */
     fun signIn() {}
+
+    /** Offline downloads for online tracks, albums, and playlists. */
+    fun isDownloaded(trackId: TrackId): Boolean = false
+    fun isDownloading(trackId: TrackId): Boolean = false
+    fun download(track: Track) {}
+    fun downloadAll(tracks: List<Track>) {}
+    fun downloadCollection(id: PlaylistId) {}
+    fun downloadArtist(id: ArtistId) {}
+    fun downloadMyPlaylist(id: String) {}
+    fun removeDownload(trackId: TrackId) {}
+    fun openDownloads() {}
+    val downloadsCount: StateFlow<Int> get() = kotlinx.coroutines.flow.MutableStateFlow(0)
 }

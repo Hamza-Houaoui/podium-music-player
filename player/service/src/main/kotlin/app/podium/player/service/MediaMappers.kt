@@ -123,15 +123,21 @@ object QueueMediaItems {
             .setExtras(extras)
             .build()
         // An item already resolved to a manifest (a custom source's DASH, D-91) is built for it.
-        val kind = if (track.kind == MediaKind.LIVE) StreamKind.FILE else StreamKind.of(item.selection?.media)
+        // Online Radio stations are LIVE but may be progressive MP3/AAC/OGG or HLS (.m3u8).
+        val isRadio = track.source.sourceId.value == "radio"
+        val kind = if (track.kind == MediaKind.LIVE && !isRadio) StreamKind.FILE else StreamKind.of(item.selection?.media)
         return MediaItem.Builder()
             .setMediaId(item.uid.value)
             .setUri(uriFor(item.uid, kind))
             .setMediaMetadata(metadata)
             .apply {
-                // A live station (D-90) is a live HLS playlist: the player must know before it loads.
                 if (track.kind == MediaKind.LIVE) {
-                    setMimeType(MimeTypes.APPLICATION_M3U8)
+                    if (!isRadio) {
+                        // A non-radio live station (D-90) is a live HLS playlist: the player must know before it loads.
+                        setMimeType(MimeTypes.APPLICATION_M3U8)
+                    } else {
+                        kind.mimeType?.let(::setMimeType)
+                    }
                     setLiveConfiguration(MediaItem.LiveConfiguration.Builder().build())
                 } else {
                     kind.mimeType?.let(::setMimeType)

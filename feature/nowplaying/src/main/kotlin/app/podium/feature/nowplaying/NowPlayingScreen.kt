@@ -171,6 +171,13 @@ fun NowPlayingScreen(
     autoHideTray: Boolean = false,
     /** Settings ▸ Now Playing (D-109): the original's own screen, with no playback keys on the display. */
     nostalgic: Boolean = false,
+    /** Offline download actions for online songs. */
+    isDownloaded: ((TrackId) -> Boolean)? = null,
+    isDownloading: ((TrackId) -> Boolean)? = null,
+    onDownload: ((Track) -> Unit)? = null,
+    onRemoveDownload: ((TrackId) -> Unit)? = null,
+    /** Edit local song info and lyrics. */
+    onEditSong: ((Track) -> Unit)? = null,
 ) {
     val snapshot by controller.snapshot.collectAsStateWithLifecycle()
     val queue by controller.queue.collectAsStateWithLifecycle()
@@ -273,6 +280,22 @@ fun NowPlayingScreen(
                                 add(MenuAction("Add to playlist") { onAddToPlaylist(item.trackId) })
                             } else if (online && onAddOnlineToPlaylist != null && song != null) {
                                 add(MenuAction("Add to playlist") { onAddOnlineToPlaylist(song) })
+                            }
+                            if (!online && song != null && onEditSong != null && item.trackId.sourceId.value == "local") {
+                                add(MenuAction("Edit song info") { onEditSong(song) })
+                            }
+                            if (online && item.kind != MediaKind.LIVE && item.trackId.sourceId.value != "radio") {
+                                when {
+                                    isDownloaded?.invoke(item.trackId) == true && onRemoveDownload != null -> {
+                                        add(MenuAction("Remove download") { onRemoveDownload(item.trackId) })
+                                    }
+                                    isDownloading?.invoke(item.trackId) == true && onRemoveDownload != null -> {
+                                        add(MenuAction("Cancel download") { onRemoveDownload(item.trackId) })
+                                    }
+                                    song != null && onDownload != null -> {
+                                        add(MenuAction("Download") { onDownload(song) })
+                                    }
+                                }
                             }
                         }
                         goTo.forEach(::add)

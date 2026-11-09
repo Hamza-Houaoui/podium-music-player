@@ -1,43 +1,14 @@
-# Gradle / Android
-.gradle/
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
 build/
 **/build/
-local.properties
 captures/
-.externalNativeBuild/
-.cxx/
+.externalNativeBuild
+.cxx
+local.properties
 *.apk
-# APKs are published as GitHub Releases, never committed (D-69).
 *.aab
-*.ap_
-*.dex
-output-metadata.json
-
-# Signing & secrets — never commit
-*.jks
-*.keystore
-keystore.properties
-signing.properties
-.env
-.env.*
-!.env.example
-secrets.properties
-
-# IDE / OS
-.idea/
-*.iml
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Promotional video renders (one uses a commercial track; never commit)
-artifacts/ad/
-/*.mp4
-
-# Tooling scratch
-.kotlin/
-*.log
-/screenshots-local/
-
-# IDE (Eclipse/VS Code Java) build output
-bin/

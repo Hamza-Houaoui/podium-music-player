@@ -74,10 +74,17 @@ class OnlineMusicRepository(
 ) : OnlineRepository {
 
     /** The online service, if it's on. */
-    private fun source(): MusicSource? = registry.ordered(MusicEnvironment.ONLINE).firstOrNull()
+    private fun source(): MusicSource? = registry.ordered(MusicEnvironment.ONLINE)
+        .firstOrNull { it.descriptor.id != app.podium.radio.RadioStation.RADIO_SOURCE_ID }
 
     private val service: StateFlow<ConnectedSource?> = registry.connectedSources
-        .map { all -> all.firstOrNull { it.enabled && it.descriptor.environment == MusicEnvironment.ONLINE } }
+        .map { all ->
+            all.firstOrNull {
+                it.enabled &&
+                    it.descriptor.environment == MusicEnvironment.ONLINE &&
+                    it.descriptor.id != app.podium.radio.RadioStation.RADIO_SOURCE_ID
+            }
+        }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
     /** Whose things are shown: the signed-in account's key, or the device's. */
