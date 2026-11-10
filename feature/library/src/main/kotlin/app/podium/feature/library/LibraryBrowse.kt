@@ -484,13 +484,24 @@ fun FavoritesScreen(
  * tap works too.
  */
 @Composable
-fun CoverFlowScreen(repository: LibraryRepository, onOpen: (AlbumId) -> Unit) {
+fun CoverFlowScreen(
+    repository: LibraryRepository,
+    onOpen: (AlbumId) -> Unit,
+    playingAlbumId: AlbumId? = null,
+    playingTrackId: app.podium.core.model.TrackId? = null,
+) {
     // By artist, then album (D-84), like an iPod's Cover Flow; the Albums list stays by title. Ordered
     // off the main thread, so opening and closing never wait on it; the last order shows meanwhile.
     val loaded = rememberLoaded(repository, initial = CoverFlowMemo.get(repository)?.let(::Loaded)) {
         repository.albums()
             .map { coverFlowOrder(it).also { ordered -> CoverFlowMemo.put(repository, ordered) } }
             .flowOn(Dispatchers.Default)
+    }
+    val tracksState by repository.songs.collectAsStateWithLifecycle()
+    val resolvedPlayingAlbumId = remember(playingAlbumId, playingTrackId, tracksState) {
+        playingAlbumId ?: playingTrackId?.let { id ->
+            (tracksState as? LibraryState.Ready)?.tracks?.firstOrNull { it.id == id }?.album?.id
+        }
     }
     val loading = loaded == null
     val albums = loaded?.value.orEmpty()
@@ -505,6 +516,7 @@ fun CoverFlowScreen(repository: LibraryRepository, onOpen: (AlbumId) -> Unit) {
         subtitleOf = { it.artist },
         artworkOf = { it.artworkUri },
         onActivate = { album, _ -> onOpen(album.id) },
+        isPlayingItem = { album -> resolvedPlayingAlbumId != null && album.id == resolvedPlayingAlbumId },
         onLongPress = { album, _ ->
             overlay.show(
                 MenuSpec(

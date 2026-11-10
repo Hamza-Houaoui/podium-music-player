@@ -20,8 +20,8 @@ android {
         // Provisional: the product name is pending trademark clearance (docs/repository-audit.md §5).
         applicationId = "app.podium"
         // A device test of the updater (D-99) builds a "newer" copy: -Ppodium.versionCode=7 -Ppodium.versionName=0.1.5.1
-        versionCode = providers.gradleProperty("podium.versionCode").orNull?.toInt() ?: 11
-        versionName = providers.gradleProperty("podium.versionName").orNull ?: "1.1"
+        versionCode = providers.gradleProperty("podium.versionCode").orNull?.toInt() ?: 12
+        versionName = providers.gradleProperty("podium.versionName").orNull ?: "1.2"
     }
     buildFeatures {
         buildConfig = true

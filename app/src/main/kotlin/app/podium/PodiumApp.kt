@@ -860,10 +860,8 @@ private fun ScreenOs(
     val behindOverlay = Modifier.defocus { maxOf(defocused.value, stage.depth * ImmersiveDefocus) }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        // The mini player sits the edge margin above the display's bottom, with the same margin
-        // above it to the content (D-103).
-        val miniBlock = if (miniPlayerVisible) Spacing.miniPlayer + Spacing.edge * 2 else Spacing.edge
-        val insets = ScreenInsets(top = ScreenHeaderHeight, bottom = miniBlock)
+        val headerTop = if (miniPlayerVisible) ScreenHeaderHeight + 16.dp else ScreenHeaderHeight
+        val insets = ScreenInsets(top = headerTop, bottom = Spacing.edge)
         val density = LocalDensity.current
         val screenHeight = maxHeight
         // The same geometry the lists use, so a screen moving away lands exactly in its box.
@@ -970,32 +968,11 @@ private fun ScreenOs(
                     output = output.indicator(),
                     clock = immersive,
                     battery = if (immersive && titleBarBattery) battery else null,
+                    nowPlayingTitle = if (miniPlayerVisible) snapshot.item?.title else null,
+                    nowPlayingArtworkUri = if (miniPlayerVisible) snapshot.item?.artworkUri else null,
+                    onOpenNowPlaying = navigator::showNowPlaying,
                     modifier = Modifier.align(Alignment.TopCenter).then(behindOverlay),
                 )
-                AnimatedVisibility(
-                    visible = miniPlayerVisible,
-                    modifier = Modifier.align(Alignment.BottomCenter).then(behindOverlay),
-                    enter = fadeIn(motion.fadeStandard()) + slideInVertically(motion.navigateOffset()) { it / 2 },
-                    exit = fadeOut(motion.fadeFast()) + slideOutVertically(motion.navigateOffset()) { it / 2 },
-                ) {
-                    val item = snapshot.item
-                    if (item != null) {
-                        MiniPlayer(
-                            title = item.title,
-                            subtitle = item.artistDisplay,
-                            artworkUri = item.artworkUri,
-                            isPlaying = snapshot.intent == PlayIntent.PLAY,
-                            progress = {
-                                val duration = item.durationMs ?: 0L
-                                if (duration <= 0) 0f else (controller.positionMs().toFloat() / duration).coerceIn(0f, 1f)
-                            },
-                            onOpen = navigator::showNowPlaying,
-                            onPlayPause = controller::togglePlayPause,
-                            onNext = controller::next,
-                            modifier = Modifier.padding(Spacing.edge).fillMaxWidth(),
-                        )
-                    }
-                }
                 // Over the title bar and the mini player, under menus and notices (D-104). The system's
                 // back goes to it, not to the screen behind.
                 stage.content?.let { moment ->
@@ -1186,7 +1163,15 @@ private fun ScreenContent(
                 downloadsArtwork = completedDownloads.mapNotNull { it.artwork?.uri }.distinct().take(8),
             )
         }
-        Dest.CoverFlow -> CoverFlowScreen(graph.library, onOpen = { navigator.push(Dest.Album(it)) })
+        Dest.CoverFlow -> {
+            val snapshot by controller.snapshot.collectAsStateWithLifecycle()
+            val playingTrackId = if (snapshot.intent == PlayIntent.PLAY) snapshot.item?.trackId else null
+            CoverFlowScreen(
+                graph.library,
+                onOpen = { navigator.push(Dest.Album(it)) },
+                playingTrackId = playingTrackId,
+            )
+        }
         Dest.Albums -> AlbumsScreen(graph.library, onOpen = { navigator.push(Dest.Album(it)) })
         Dest.Artists -> ArtistsScreen(graph.library, onOpen = { navigator.push(Dest.Artist(it)) })
         is Dest.Album -> AlbumScreen(graph.library, screen.id, onPlay = play, onPlayNext = playNext, onAddToQueue = addToQueue)
@@ -1288,7 +1273,15 @@ private fun ScreenContent(
                 }
             },
         )
-        Dest.Lyrics -> LyricsScreen(controller, graph.lyricsGateway, graph.audioPulse)
+        Dest.Lyrics -> LyricsScreen(
+            controller = controller,
+            gateway = graph.lyricsGateway,
+            pulse = graph.audioPulse,
+            onSelectTheme = { chosen ->
+                val current = settings.appearance.value
+                settings.setAppearance(current.copy(screen = current.screen.copy(lyricsTheme = chosen)))
+            },
+        )
         is Dest.Online -> OnlineScreen(
             place = screen.place,
             repository = graph.online,
@@ -1841,7 +1834,10 @@ private fun rememberOnlineActions(graph: AppGraph, navigator: Navigator): Online
             }
 
             override val nowPlaying: StateFlow<Track?> = controller.snapshot
-                .map { snap -> snap.item?.trackId?.takeIf { graph.environments.isOnline(it) }?.let { graph.catalog.cached(it) } }
+                .map { snap ->
+                    if (snap.intent != PlayIntent.PLAY) return@map null
+                    snap.item?.trackId?.takeIf { graph.environments.isOnline(it) }?.let { graph.catalog.cached(it) }
+                }
                 .stateIn(scope, SharingStarted.Eagerly, null)
 
             override fun isDownloaded(trackId: TrackId): Boolean = graph.downloads.isDownloaded(trackId)

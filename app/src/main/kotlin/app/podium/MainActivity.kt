@@ -12,6 +12,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.withResumed
+import app.podium.core.common.Outcome
+import app.podium.core.model.ArtistCredit
+import app.podium.core.model.Availability
+import app.podium.core.model.PlaybackRoute
+import app.podium.core.model.PlaylistId
+import app.podium.core.model.SourceRef
+import app.podium.core.model.Track
+import app.podium.core.model.TrackId
 import app.podium.sources.api.CapabilityAction
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -56,6 +64,7 @@ class MainActivity : ComponentActivity() {
         graph.startListening()
         handleDebugIntent(intent, graph)
         applyDebugWindowCommand(intent, this)
+        handleIncomingIntent(intent)
         setContent {
             PodiumApp(graph, onSourceAction = ::perform, onTurnOff = ::turnOff)
         }
@@ -97,8 +106,109 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleDebugIntent(intent, graph)
         applyDebugWindowCommand(intent, this)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        when (intent.action) {
+            Intent.ACTION_VIEW -> {
+                val uri = intent.data ?: return
+                val scheme = uri.scheme?.lowercase()
+                if (scheme == "http" || scheme == "https") {
+                    openExternalUrl(uri)
+                } else if (scheme == "content" || scheme == "file") {
+                    openLocalAudioUri(uri)
+                }
+            }
+            Intent.ACTION_SEND -> {
+                val streamUri = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                if (streamUri != null) {
+                    openLocalAudioUri(streamUri)
+                    return
+                }
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+                val extractedUrl = Regex("https?://\\S+").find(text)?.value ?: return
+                openExternalUrl(Uri.parse(extractedUrl))
+            }
+        }
+    }
+
+    private fun openLocalAudioUri(uri: Uri) {
+        graph.wake()
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        lifecycleScope.launch {
+            runCatching {
+                val track = graph.localSource.resolveExternalUri(uri) ?: return@launch
+                graph.catalog.remember(listOf(track))
+                graph.playbackController.playContext(listOf(track.id), 0, track.title)
+                graph.power.first { it == Power.ON }
+                graph.debugOpen.value = "now-playing"
+            }
+        }
+    }
+
+    private fun openExternalUrl(uri: Uri) {
+        val host = uri.host?.lowercase() ?: return
+        val isYouTube = host.contains("youtube.com") || host == "youtu.be"
+        if (!isYouTube) return
+        val videoId = extractYouTubeVideoId(uri)
+        val playlistId = uri.getQueryParameter("list")?.takeIf { it.isNotBlank() && videoId == null }
+        graph.wake()
+        lifecycleScope.launch {
+            runCatching {
+                if (videoId != null) {
+                    val ytmId = graph.youtubeMusic.descriptor.id
+                    val fetched = (graph.youtubeMusic.catalog.track(SourceRef(ytmId, videoId)) as? Outcome.Success)?.value
+                    val track = fetched ?: Track(
+                        id = TrackId.of(ytmId, videoId),
+                        source = SourceRef(ytmId, videoId, providerUri = "https://music.youtube.com/watch?v=$videoId"),
+                        title = "YouTube Music",
+                        artists = listOf(ArtistCredit("YouTube Music")),
+                        availability = Availability.Playable,
+                        routes = setOf(PlaybackRoute.DIRECT),
+                    )
+                    graph.catalog.remember(listOf(track))
+                    graph.playbackController.playContext(listOf(track.id), 0, track.title)
+                    graph.power.first { it == Power.ON }
+                    graph.debugOpen.value = "now-playing"
+                } else if (playlistId != null) {
+                    val ytmId = graph.youtubeMusic.descriptor.id
+                    val detail = (graph.youtubeMusic.catalog.playlist(PlaylistId.of(ytmId, playlistId)) as? Outcome.Success)?.value
+                    val tracks = detail?.tracks.orEmpty()
+                    if (tracks.isNotEmpty()) {
+                        graph.catalog.remember(tracks)
+                        graph.playbackController.playContext(tracks.map { it.id }, 0, detail?.summary?.title ?: "Playlist")
+                        graph.power.first { it == Power.ON }
+                        graph.debugOpen.value = "now-playing"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractYouTubeVideoId(uri: Uri): String? {
+        val host = uri.host?.lowercase() ?: return null
+        if (host == "youtu.be") {
+            return uri.pathSegments.firstOrNull()?.takeIf { it.isNotBlank() }
+        }
+        uri.getQueryParameter("v")?.takeIf { it.isNotBlank() }?.let { return it }
+        val segs = uri.pathSegments
+        val idx = segs.indexOfFirst { it == "shorts" || it == "embed" || it == "live" }
+        if (idx >= 0 && idx + 1 < segs.size) {
+            return segs[idx + 1].takeIf { it.isNotBlank() }
+        }
+        return null
     }
 
     override fun onResume() {

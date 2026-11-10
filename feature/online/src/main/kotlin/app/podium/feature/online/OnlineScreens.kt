@@ -541,6 +541,7 @@ fun OnlineCoverFlowScreen(
     }
     val liked by repository.likedTracks.collectAsStateWithLifecycle(initialValue = emptyList())
     val recent by repository.recentlyPlayed.collectAsStateWithLifecycle(initialValue = emptyList())
+    val nowPlayingTrack by actions.nowPlaying.collectAsStateWithLifecycle()
     val overlayHost = overlay()
     val scope = rememberCoroutineScope()
 
@@ -586,6 +587,14 @@ fun OnlineCoverFlowScreen(
         titleOf = { it.title },
         subtitleOf = { it.subtitle },
         artworkOf = { it.artworkUri },
+        isPlayingItem = { item ->
+            val playing = nowPlayingTrack ?: return@CoverFlowStage false
+            when (item) {
+                is OnlineCoverItem.SongItem -> item.track.id == playing.id
+                is OnlineCoverItem.CollectionItem -> playing.album?.id?.value == item.summary.id.value ||
+                    playing.album?.title?.equals(item.summary.title, ignoreCase = true) == true
+            }
+        },
         onActivate = { item, _ ->
             when (item) {
                 is OnlineCoverItem.CollectionItem -> {

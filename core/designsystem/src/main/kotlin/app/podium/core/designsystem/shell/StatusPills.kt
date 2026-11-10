@@ -65,6 +65,8 @@ class StatusItem(
     val key: String,
     /** Items with the same housing share one pill, side by side, a hairline between them. */
     val housing: Int,
+    /** When true, content fills its housing edge-to-edge without horizontal slot padding. */
+    val fullBleed: Boolean = false,
     val content: @Composable () -> Unit,
 )
 
@@ -83,17 +85,25 @@ fun StatusPills(items: List<StatusItem>, modifier: Modifier = Modifier, height: 
     val colors = PodiumTheme.colors
     val tone = LocalAlbumTone.current
     val reduced = PodiumTheme.motion.reduced
-    val slots = remember { mutableStateListOf<PillSlot>().apply { items.forEach { add(PillSlot(it.key, it.housing, it.content, 1f)) } } }
+    val slots = remember { mutableStateListOf<PillSlot>().apply { items.forEach { add(PillSlot(it.key, it.housing, it.fullBleed, it.content, 1f)) } } }
     // Motions outlive a change of items: a new arrival never cuts another one's movement short.
     val scope = rememberCoroutineScope()
     // The latest content for every item still shown.
-    SideEffect { items.forEach { item -> slots.firstOrNull { it.key == item.key }?.content = item.content } }
+    SideEffect {
+        items.forEach { item ->
+            slots.firstOrNull { it.key == item.key }?.let {
+                it.content = item.content
+                it.fullBleed = item.fullBleed
+            }
+        }
+    }
     LaunchedEffect(items.map { it.key to it.housing }) {
         val before = slots.toList()
         val next = ArrayList<PillSlot>()
         for (item in items) {
-            val slot = before.firstOrNull { it.key == item.key } ?: PillSlot(item.key, item.housing, item.content, 0f)
+            val slot = before.firstOrNull { it.key == item.key } ?: PillSlot(item.key, item.housing, item.fullBleed, item.content, 0f)
             slot.housing = item.housing
+            slot.fullBleed = item.fullBleed
             slot.leaving = false
             next += slot
         }
@@ -153,7 +163,13 @@ fun StatusPills(items: List<StatusItem>, modifier: Modifier = Modifier, height: 
     ) { measurables, _ ->
         val placeables = measurables.map { it.measure(Constraints()) }
         val padding = SlotPadding.toPx()
-        val widths = FloatArray(placeables.size) { i -> max(placeables[i].width + padding * 2, pillPx) }
+        val widths = FloatArray(placeables.size) { i ->
+            if (shown.getOrNull(i)?.fullBleed == true) {
+                max(placeables[i].width.toFloat(), pillPx)
+            } else {
+                max(placeables[i].width + padding * 2, pillPx)
+            }
+        }
         geometry.update(shown, widths, pillPx, HousingGap.toPx())
         layout(geometry.width.roundToInt().coerceAtLeast(0), pillPx.roundToInt()) {
             placeables.forEachIndexed { i, p ->
@@ -166,8 +182,9 @@ fun StatusPills(items: List<StatusItem>, modifier: Modifier = Modifier, height: 
 
 /** One item, alive: arriving or leaving with its presence (0–1, overshooting a little on arrival). */
 @Stable
-private class PillSlot(val key: String, housing: Int, content: @Composable () -> Unit, presence: Float) {
+private class PillSlot(val key: String, housing: Int, fullBleed: Boolean, content: @Composable () -> Unit, presence: Float) {
     var housing by mutableIntStateOf(housing)
+    var fullBleed by mutableStateOf(fullBleed)
     var content by mutableStateOf(content)
     var leaving by mutableStateOf(false)
     val presence: Animatable<Float, AnimationVector1D> = Animatable(presence)

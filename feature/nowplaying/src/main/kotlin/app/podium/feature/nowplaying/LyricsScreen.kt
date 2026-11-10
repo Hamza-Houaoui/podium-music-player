@@ -6,13 +6,20 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -110,7 +117,12 @@ interface LyricsGateway {
  *   Continuous line keeps its own instrumental line art.
  */
 @Composable
-fun LyricsScreen(controller: PlaybackController, gateway: LyricsGateway, pulse: AudioPulse = AudioPulse.None) {
+fun LyricsScreen(
+    controller: PlaybackController,
+    gateway: LyricsGateway,
+    pulse: AudioPulse = AudioPulse.None,
+    onSelectTheme: ((LyricsTheme) -> Unit)? = null,
+) {
     val snapshot by controller.snapshot.collectAsStateWithLifecycle()
     val item = snapshot.item
     val haptics = rememberPodiumHaptics()
@@ -163,11 +175,13 @@ fun LyricsScreen(controller: PlaybackController, gateway: LyricsGateway, pulse: 
         val listening = pulse.listen()
         onPauseOrDispose { listening.close() }
     }
-    val continuous = LocalLyricsTheme.current == LyricsTheme.CONTINUOUS_LINE
+    val theme = LocalLyricsTheme.current
+    val continuous = theme == LyricsTheme.CONTINUOUS_LINE
+    val scrolling = theme == LyricsTheme.SCROLLING
     // When the orb comes (D-83): Classic only, from the lyrics' own times.
-    val orb = remember(lyrics, result, item?.durationMs, continuous) {
+    val orb = remember(lyrics, result, item?.durationMs, continuous, scrolling) {
         when {
-            continuous -> OrbTimeline.NEVER
+            continuous || scrolling -> OrbTimeline.NEVER
             lyrics is Lyrics.Synced -> OrbTimeline.of(lyrics, item?.durationMs)
             lyrics == Lyrics.Instrumental || result == LyricsResult.NotFound -> OrbTimeline.ALWAYS
             else -> OrbTimeline.NEVER
@@ -262,10 +276,10 @@ fun LyricsScreen(controller: PlaybackController, gateway: LyricsGateway, pulse: 
 
     // Classic: the two states of the display, Bone's paper and Carbon's black, never anything else;
     // turning with every line, or staying one (D-100). Continuous line: one matte black sheet with
-    // ivory ink (D-81).
-    val inverted = lyricInverted(LocalLyricsBackground.current, continuous, lines.isNotEmpty(), index)
+    // ivory ink (D-81). Scrolling: Carbon's dark canvas with bright white active lyrics.
+    val inverted = if (scrolling) true else lyricInverted(LocalLyricsBackground.current, continuous, lines.isNotEmpty(), index)
     val reduced = PodiumTheme.motion.reduced
-    val spec = if (reduced || continuous) snap<Color>() else tween<Color>(INVERT_MS)
+    val spec = if (reduced || continuous || scrolling) snap<Color>() else tween<Color>(INVERT_MS)
     val paper by animateColorAsState(if (continuous) LineInk.Paper else if (inverted) CarbonColors.canvas else PaperColors.canvas, spec, label = "lyricPaper")
     val ink by animateColorAsState(if (continuous) LineInk.Ivory else if (inverted) CarbonColors.labelPrimary else PaperColors.labelPrimary, spec, label = "lyricInk")
     val quiet = if (continuous) LineInk.Quiet else if (inverted) CarbonColors.labelSecondary else PaperColors.labelSecondary
@@ -332,8 +346,44 @@ fun LyricsScreen(controller: PlaybackController, gateway: LyricsGateway, pulse: 
                 }
                 lyrics == Lyrics.Instrumental && orb.always -> OrbStage(controller, pulse, orb, advancing, following = true, paper, "Instrumental", page = {})
                 lyrics == Lyrics.Instrumental -> Message("Instrumental", "This song has no words.", ink, quiet)
+                scrolling -> ScrollingLyrics(
+                    lines = lines,
+                    activeIndex = index,
+                    ink = ink,
+                    quiet = quiet,
+                    onLineTap = { tappedIndex ->
+                        index = tappedIndex
+                        if (lyrics is Lyrics.Synced && snapshot.controls.seek) {
+                            controller.seekTo(lyrics.lines[tappedIndex].startMs)
+                            following = true
+                            haptics.confirm()
+                        } else {
+                            details = !details
+                        }
+                    },
+                )
                 else -> OrbStage(controller, pulse, orb, advancing, following = lyrics is Lyrics.Synced && following, paper, caption = null) { swell ->
                     Lyric(lines.getOrElse(index) { "" }, ink, quiet, if (lyrics is Lyrics.Synced) shown else Int.MAX_VALUE, swell)
+                }
+            }
+            if (onSelectTheme != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 12.dp, end = 14.dp)
+                        .background(ink.copy(alpha = 0.12f), RoundedCornerShape(999.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            val entries = LyricsTheme.entries
+                            val next = entries[(entries.indexOf(theme) + 1) % entries.size]
+                            haptics.confirm()
+                            onSelectTheme(next)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    PodiumText(theme.label, PodiumTheme.type.footnote, ink.copy(alpha = 0.82f))
                 }
             }
             if (details && item != null) {
@@ -351,6 +401,104 @@ fun LyricsScreen(controller: PlaybackController, gateway: LyricsGateway, pulse: 
                     if (result is LyricsResult.Found) {
                         PodiumText("Lyrics from ${gateway.attribution.name}", PodiumTheme.type.footnote, quiet, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Spotify-style vertical scrolling lyrics: all lines in a vertical column, the active line
+ * highlighted and smoothly scrolled to the middle of the screen. Turning the Wheel moves focus
+ * line by line; tapping a line or pressing Center jumps playback to that line.
+ */
+@Composable
+private fun ScrollingLyrics(
+    lines: List<String>,
+    activeIndex: Int,
+    ink: Color,
+    quiet: Color,
+    onLineTap: (Int) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val typeface = LocalLyricsTypeface.current
+    val base = PodiumTheme.type.title
+    val reduced = PodiumTheme.motion.reduced
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val density = LocalDensity.current
+        val halfViewportPx = with(density) { (maxHeight * 0.36f).roundToPx() }
+        val verticalPad = maxHeight * 0.34f
+
+        LaunchedEffect(activeIndex, lines.size) {
+            if (activeIndex in lines.indices) {
+                if (reduced) {
+                    listState.scrollToItem(activeIndex, -halfViewportPx)
+                } else {
+                    listState.animateScrollToItem(activeIndex, -halfViewportPx)
+                }
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                top = verticalPad,
+                bottom = verticalPad,
+                start = 22.dp,
+                end = 22.dp,
+            ),
+        ) {
+            itemsIndexed(lines) { i, line ->
+                val isActive = i == activeIndex
+                val isPast = i < activeIndex
+                val text = line.ifBlank { "♪" }
+                val family = remember(text, typeface) { typeface.familyFor(text) }
+                val lineAlpha by animateFloatAsState(
+                    targetValue = when {
+                        isActive -> 1f
+                        isPast -> 0.36f
+                        else -> 0.52f
+                    },
+                    animationSpec = if (reduced) snap() else tween(220),
+                    label = "lyricLineAlpha",
+                )
+                val lineScale by animateFloatAsState(
+                    targetValue = if (isActive) 1.03f else 0.96f,
+                    animationSpec = if (reduced) snap() else tween(220),
+                    label = "lyricLineScale",
+                )
+                val lineStyle = remember(base, family, isActive) {
+                    base.copy(
+                        fontFamily = family,
+                        fontSize = if (isActive) 21.sp else 18.sp,
+                        lineHeight = if (isActive) 27.sp else 24.sp,
+                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                        letterSpacing = 0.sp,
+                    )
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .graphicsLayer {
+                            alpha = lineAlpha
+                            scaleX = lineScale
+                            scaleY = lineScale
+                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                        }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onLineTap(i) },
+                ) {
+                    PodiumText(
+                        text = text,
+                        style = lineStyle,
+                        color = if (isActive) ink else quiet,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }

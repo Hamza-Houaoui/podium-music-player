@@ -1,6 +1,10 @@
 package app.podium.feature.nowplaying
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -201,6 +205,13 @@ fun NowPlayingScreen(
     var detentRemainder by remember { mutableIntStateOf(0) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
     var actionFocus by remember { mutableIntStateOf(0) }
+    val context = LocalContext.current
+    val prefs = remember(context) { context.getSharedPreferences("podium_now_playing_prefs", Context.MODE_PRIVATE) }
+    var progressStyle by remember {
+        val saved = prefs.getString("progress_bar_style", ProgressBarStyle.WAVEFORM.name)
+        val initial = ProgressBarStyle.entries.firstOrNull { it.name == saved } ?: ProgressBarStyle.WAVEFORM
+        mutableStateOf(initial)
+    }
 
     /**
      * The tray has slid away (D-108). It goes once nothing has been touched for [TrayIdleMillis], and
@@ -270,6 +281,30 @@ fun NowPlayingScreen(
                     buildList {
                         add(MenuAction("Lyrics", onSelect = onLyrics))
                         add(MenuAction("Up Next", onSelect = onUpNext))
+                        add(
+                            MenuAction("Share") {
+                                val srcId = item.trackId.sourceId.value
+                                val key = playingTrack?.source?.providerKey
+                                    ?: item.trackId.value.substringAfter(':', "")
+                                val providerUri = playingTrack?.source?.providerUri
+                                val link = when {
+                                    providerUri != null && (providerUri.startsWith("http://") || providerUri.startsWith("https://")) -> providerUri
+                                    srcId == "ytmusic" && key.isNotEmpty() -> "https://music.youtube.com/watch?v=$key"
+                                    else -> {
+                                        val q = Uri.encode(listOf(item.title, item.artistDisplay).filter { it.isNotBlank() }.joinToString(" "))
+                                        "https://music.youtube.com/search?q=$q"
+                                    }
+                                }
+                                val label = if (item.artistDisplay.isNotBlank()) "${item.title} by ${item.artistDisplay}" else item.title
+                                val send = Intent(Intent.ACTION_SEND)
+                                    .setType("text/plain")
+                                    .putExtra(Intent.EXTRA_TEXT, "$label\n$link")
+                                context.startActivity(
+                                    Intent.createChooser(send, "Share ${item.title}")
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            },
+                        )
                         add(MenuAction(if (isFavorite) "Remove from favorites" else "Add to favorites") { favorites.toggle(item.trackId) })
                         // Add to playlist (D-106, D-109): the library's playlists for a song of the
                         // library, ONLINE's own for an online song. Never while another device plays.
@@ -299,6 +334,22 @@ fun NowPlayingScreen(
                             }
                         }
                         goTo.forEach(::add)
+                        add(
+                            MenuAction("Progress bar: ${progressStyle.label}") {
+                                overlay.show(
+                                    MenuSpec(
+                                        "Progress bar style",
+                                        ProgressBarStyle.entries.map { style ->
+                                            val mark = if (style == progressStyle) "✓ " else ""
+                                            MenuAction("$mark${style.label}") {
+                                                progressStyle = style
+                                                prefs.edit().putString("progress_bar_style", style.name).apply()
+                                            }
+                                        },
+                                    ),
+                                )
+                            },
+                        )
                         if (sleepTimer != null) add(MenuAction("Sleep timer") { overlay.show(sleepTimerMenu(sleepTimer)) })
                         if (remoteOwner != null) {
                             add(MenuAction("Open ${remoteOwner.displayName}") { controller.openRemoteApp() })
@@ -500,6 +551,7 @@ fun NowPlayingScreen(
             queue.entries.getOrNull(queue.currentIndex + 1)?.artworkUri,
             queue.entries.getOrNull(queue.currentIndex - 1)?.artworkUri,
         ).distinct(),
+        progressStyle = progressStyle,
     )
     // The controls' glass refracts the cover's light, so that light is the captured layer. On Glass
     // the cover's colours flow behind Now Playing while the music plays (D-103); Carbon's flow is the
@@ -564,6 +616,8 @@ internal class NowPlayingParts(
     val trayHidden: Boolean = false,
     /** Something on the display was touched: the tray's clock starts again (D-108). */
     val touched: () -> Unit = {},
+    /** Selected visual theme for the song progress bar. */
+    val progressStyle: ProgressBarStyle = ProgressBarStyle.WAVEFORM,
 )
 
 /** Tall screens: the same stacked composition in every theme (D-103). */
@@ -589,10 +643,12 @@ private fun CompactLayout(p: NowPlayingParts) {
                     ArtworkStage(p, maxWidth, maxHeight, artTravel(rowWidth, Spacing.edge))
                 }
                 Spacer(Modifier.width(Spacing.m))
-                Box(Modifier.weight(0.58f)) { TrackText(p.item, Alignment.Start, TextAlign.Start) }
+                Box(Modifier.weight(0.58f)) { TrackText(p, Alignment.Start, TextAlign.Start) }
             }
             Spacer(Modifier.height(Spacing.s))
             NowPlayingProgress(p)
+            Spacer(Modifier.height(Spacing.xxs))
+            TrackSubtitle(p.item, Alignment.CenterHorizontally, TextAlign.Center)
             StatusSlot(p)
             NowPlayingTransport(p, compact = true)
         }
@@ -739,15 +795,16 @@ internal fun ArtworkStage(
     }
 }
 
-/** Title (strongest), artist, album. Long titles scroll slowly; the rest ellipsize. */
+/** Title (strongest) and compact quality badge underneath. Long titles scroll slowly. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun TrackText(item: NowPlayingItem, alignment: Alignment.Horizontal, textAlign: TextAlign) {
+internal fun TrackText(p: NowPlayingParts, alignment: Alignment.Horizontal, textAlign: TextAlign) {
     val colors = PodiumTheme.colors
     val type = PodiumTheme.type
     val motion = PodiumTheme.motion
+    val quality = QualityLabel.forNowPlaying(p.snapshot.quality)
     AnimatedContent(
-        targetState = item,
+        targetState = p.item,
         contentKey = { it.uid },
         transitionSpec = { fadeIn(tween(if (motion.reduced) 120 else 220, delayMillis = 40)) togetherWith fadeOut(tween(120)) },
         label = "trackText",
@@ -762,22 +819,39 @@ internal fun TrackText(item: NowPlayingItem, alignment: Alignment.Horizontal, te
                     .semantics { heading() },
                 textAlign = textAlign,
             )
-            // Artist and album read as one quieter pair under the title (D-103).
-            PodiumText(shown.artistDisplay, type.nowPlayingSubtitle, colors.labelSecondary, textAlign = textAlign)
-            shown.albumTitle?.takeIf { it.isNotBlank() }?.let {
-                PodiumText(it, type.nowPlayingSubtitle.copy(fontWeight = FontWeight(500)), colors.labelSecondary, textAlign = textAlign)
+            quality?.let {
+                Spacer(Modifier.height(Spacing.xxs))
+                QualityChip(it)
             }
-            videoNote(shown.kind)?.let {
-                PodiumText(it, type.footnote, colors.labelTertiary, textAlign = textAlign)
+        }
+    }
+}
+
+/** Artist and album/station subtitle placed below the progress bar in a slightly smaller scale. */
+@Composable
+internal fun TrackSubtitle(item: NowPlayingItem, alignment: Alignment.Horizontal, textAlign: TextAlign) {
+    val colors = PodiumTheme.colors
+    val type = PodiumTheme.type
+    val motion = PodiumTheme.motion
+    AnimatedContent(
+        targetState = item,
+        contentKey = { it.uid },
+        transitionSpec = { fadeIn(tween(if (motion.reduced) 120 else 220, delayMillis = 40)) togetherWith fadeOut(tween(120)) },
+        label = "trackSubtitle",
+    ) { shown ->
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
+            PodiumText(shown.artistDisplay, type.rowSecondary, colors.labelSecondary, textAlign = textAlign)
+            shown.albumTitle?.takeIf { it.isNotBlank() }?.let {
+                PodiumText(it, type.rowSecondary.copy(fontWeight = FontWeight(400)), colors.labelTertiary, textAlign = textAlign)
             }
         }
     }
 }
 
 /**
- * Beside the cover: the song's place in the queue, the measured quality, where it belongs
- * ("Online"), and any note — an error, a retry, scrubbing, a source's quality claim — on as many
- * lines as it needs (up to five), so nothing is ever cut off whatever the font.
+ * Beside the cover: the song's place in the queue, media kind note ("Live radio" / "Video"),
+ * where it belongs ("Online" / "Radio"), and any note — an error, a retry, scrubbing, a source's
+ * quality claim — on as many lines as it needs (up to five), so nothing is ever cut off whatever the font.
  */
 @Composable
 internal fun StatusColumn(p: NowPlayingParts, modifier: Modifier = Modifier) {
@@ -787,7 +861,7 @@ internal fun StatusColumn(p: NowPlayingParts, modifier: Modifier = Modifier) {
     val quiet = colors.labelSecondary
     Column(modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         if (!p.queueHidden) PodiumText("${p.item.indexInQueue + 1} of ${p.item.queueSize}", type.caption, colors.labelSecondary)
-        QualityLabel.forNowPlaying(p.snapshot.quality)?.let { QualityChip(it) }
+        videoNote(p.item.kind)?.let { PodiumText(it, type.caption, colors.labelSecondary) }
         p.environment?.let { PodiumText(it, type.caption, quiet) }
         p.sleepNote?.let { PodiumText(it, type.caption, colors.labelSecondary) }
         if (note != null) {

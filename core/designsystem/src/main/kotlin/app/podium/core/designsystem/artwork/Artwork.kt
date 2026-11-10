@@ -134,7 +134,7 @@ fun ArtworkImage(
 
 /** Placeholder (a smaller cached copy) or fallback, with the real image fading in over it. */
 @Composable
-private fun ArtworkLayers(art: ArtworkState, fallbackText: String) {
+internal fun ArtworkLayers(art: ArtworkState, fallbackText: String) {
     if (art.bitmap == null && art.settled) ArtworkFallback(fallbackText, Modifier.fillMaxSize())
     if (art.bitmap == null) {
         art.placeholder?.let { Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }

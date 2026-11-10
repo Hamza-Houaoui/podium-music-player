@@ -27,6 +27,9 @@ enum class LyricsTheme(val label: String) {
 
     /** One ivory line writes the words by hand on black and draws the music between them. */
     CONTINUOUS_LINE("Continuous line"),
+
+    /** Vertical scrolling lyrics list with the active line highlighted and centered. */
+    SCROLLING("Scrolling"),
 }
 
 /**

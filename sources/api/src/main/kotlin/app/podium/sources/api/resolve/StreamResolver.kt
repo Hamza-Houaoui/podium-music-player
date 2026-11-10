@@ -134,6 +134,26 @@ class StreamResolver(
     private val inFlight = mutableMapOf<String, CompletableDeferred<ResolveOutcome>>()
 
     suspend fun resolve(request: ResolveRequest): ResolveOutcome {
+        if (!request.refreshPinnedSourceOnly) {
+            // Always prefer a verified offline owned copy on disk over a pinned remote stream URL.
+            val environment = environmentOf(request.track.source.sourceId)
+            for (locator in ownedCopies) {
+                val found = locator.find(request.track) ?: continue
+                val (ownedTrack, media) = found
+                if (ownedTrack.id != request.track.id && (environment == null || environmentOf(ownedTrack.source.sourceId) != environment)) continue
+                return ResolveOutcome.Resolved(
+                    Selection(
+                        target = PlaybackTarget.DirectStream(ownedTrack.id, media),
+                        path = ResolutionPath.OWNED_COPY,
+                        servedBy = media.sourceId,
+                        servedTrack = ownedTrack,
+                        resolvedAtMillis = clock.nowMillis(),
+                    ),
+                    reused = request.pinned?.path == ResolutionPath.OWNED_COPY,
+                    attempts = listOf(ResolveAttempt(ResolutionPath.OWNED_COPY, media.sourceId, ResolveAttempt.Kind.RESOLVED)),
+                )
+            }
+        }
         request.pinned?.let { pinned ->
             if (!request.refreshPinnedSourceOnly && pinned.isUsableAt(clock.nowMillis())) {
                 return ResolveOutcome.Resolved(

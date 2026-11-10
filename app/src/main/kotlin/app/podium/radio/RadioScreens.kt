@@ -309,6 +309,8 @@ private fun RadioCoverFlowScreen(
     onOpenNowPlaying: () -> Unit,
 ) {
     val favorites by repository.favorites.collectAsStateWithLifecycle()
+    val snapshot by controller.snapshot.collectAsStateWithLifecycle()
+    val playingId = if (snapshot.intent == app.podium.player.api.PlayIntent.PLAY) snapshot.item?.trackId else null
     val overlay = LocalOverlayHost.current
     val haptics = rememberPodiumHaptics()
 
@@ -319,6 +321,7 @@ private fun RadioCoverFlowScreen(
         titleOf = { it.name },
         subtitleOf = { it.subtitle },
         artworkOf = { it.toPodiumTrack().artwork?.uri },
+        isPlayingItem = { station -> playingId != null && station.toPodiumTrack().id == playingId },
         onActivate = { _, index ->
             playStations(favorites, index, "Favorite Radio", repository, catalog, controller, onOpenNowPlaying)
         },

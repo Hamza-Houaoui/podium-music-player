@@ -8,7 +8,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import kotlin.math.abs
+import kotlin.math.sin
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -58,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.State
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import app.podium.core.designsystem.component.ProgressBar
 import app.podium.core.designsystem.component.SquiggleProgress
@@ -149,9 +153,11 @@ internal fun StackedPortrait(p: NowPlayingParts) {
             }
         }
         Spacer(Modifier.height(GroupGap - TitleInkInset))
-        TrackText(p.item, Alignment.Start, TextAlign.Start)
+        TrackText(p, Alignment.Start, TextAlign.Start)
         Spacer(Modifier.height(GroupGap - TextInkInset - PlayheadInset))
         NowPlayingProgress(p)
+        Spacer(Modifier.height(Spacing.xxs))
+        TrackSubtitle(p.item, Alignment.CenterHorizontally, TextAlign.Center)
         Spacer(Modifier.height(GroupGap - TextInkInset))
         NowPlayingTransport(p, Modifier.align(Alignment.CenterHorizontally))
         }
@@ -191,9 +197,11 @@ internal fun NostalgicPortrait(p: NowPlayingParts) {
                 }
             }
             Spacer(Modifier.height(Spacing.m))
-            TrackText(p.item, Alignment.CenterHorizontally, TextAlign.Center)
+            TrackText(p, Alignment.CenterHorizontally, TextAlign.Center)
             Spacer(Modifier.height(Spacing.s + Spacing.xxs))
             NowPlayingProgress(p)
+            Spacer(Modifier.height(Spacing.xxs))
+            TrackSubtitle(p.item, Alignment.CenterHorizontally, TextAlign.Center)
             Spacer(Modifier.height(Spacing.s))
             DotVisualiser(
                 p.controller,
@@ -218,10 +226,18 @@ private val NostalgicGutter = Spacing.xl
 private const val NostalgicVisualiserWidth = 0.88f
 private val NostalgicVisualiserHeight = 40.dp
 
+internal enum class ProgressBarStyle(val label: String) {
+    WAVEFORM("Waveform bars"),
+    WAVE("Squiggle wave"),
+    NEON("Glowing neon"),
+    RETRO("Retro LCD blocks"),
+    DOTS("Dotted matrix"),
+    TUNER("Radio tuner dial"),
+}
+
 /**
  * The seek bar and the times under it; the volume bar in its place while the Wheel turns the volume;
- * "Loading" while the song first loads. One fixed height, so nothing below ever moves. Carbon and
- * Glass draw the wave (D-101); the instrument its flat rule.
+ * "Loading" while the song first loads. One fixed height, so nothing below ever moves.
  */
 @Composable
 internal fun NowPlayingProgress(p: NowPlayingParts) {
@@ -261,20 +277,311 @@ internal fun NowPlayingProgress(p: NowPlayingParts) {
                     }
                 }
                 val seekable = p.snapshot.controls.seek && duration > 0 && !live
-                if (colors.style == DisplayStyle.INDUSTRIAL) {
-                    SeekRule(p, position, seekable, duration)
-                } else {
-                    SquiggleProgress(
+                val playing = p.snapshot.status == PlaybackStatus.Playing
+                val onSeek: (Float) -> Unit = { f -> controller.seekTo((f * duration).toLong().coerceIn(0, duration)) }
+                when (p.progressStyle) {
+                    ProgressBarStyle.WAVEFORM -> WaveformProgress(
                         progress = position,
-                        playing = p.snapshot.status == PlaybackStatus.Playing,
+                        playing = playing,
+                        live = live,
                         seekable = seekable,
                         emphasized = p.mode == WheelMode.Scrub,
-                        onSeek = { f -> controller.seekTo((f * duration).toLong().coerceIn(0, duration)) },
+                        seed = p.item.uid.value.hashCode(),
+                        onSeek = onSeek,
+                    )
+                    ProgressBarStyle.WAVE -> if (colors.style == DisplayStyle.INDUSTRIAL) {
+                        SeekRule(p, position, seekable, duration)
+                    } else {
+                        SquiggleProgress(
+                            progress = position,
+                            playing = playing,
+                            seekable = seekable,
+                            emphasized = p.mode == WheelMode.Scrub,
+                            onSeek = onSeek,
+                        )
+                    }
+                    ProgressBarStyle.NEON -> NeonProgress(
+                        progress = position,
+                        playing = playing,
+                        seekable = seekable,
+                        emphasized = p.mode == WheelMode.Scrub,
+                        onSeek = onSeek,
+                    )
+                    ProgressBarStyle.RETRO -> RetroProgress(
+                        progress = position,
+                        seekable = seekable,
+                        emphasized = p.mode == WheelMode.Scrub,
+                        onSeek = onSeek,
+                    )
+                    ProgressBarStyle.DOTS -> DotsProgress(
+                        progress = position,
+                        playing = playing,
+                        seekable = seekable,
+                        emphasized = p.mode == WheelMode.Scrub,
+                        onSeek = onSeek,
+                    )
+                    ProgressBarStyle.TUNER -> TunerProgress(
+                        progress = position,
+                        seekable = seekable,
+                        emphasized = p.mode == WheelMode.Scrub,
+                        onSeek = onSeek,
                     )
                 }
                 NowPlayingTimes(p)
             }
         }
+    }
+}
+
+/** Theme 1: SoundCloud-style vertical audio waveform bars that fill with song progress and dance while playing. */
+@Composable
+private fun WaveformProgress(
+    progress: () -> Float,
+    playing: Boolean,
+    live: Boolean,
+    seekable: Boolean,
+    emphasized: Boolean,
+    seed: Int,
+    onSeek: (Float) -> Unit,
+) {
+    val colors = PodiumTheme.colors
+    val tone = LocalAlbumTone.current
+    val activeColor = if (colors.isTonal) tone.accent else colors.labelPrimary
+    val inactiveColor = colors.labelTertiary.copy(alpha = 0.34f)
+    val barCount = 42
+    val baseHeights = remember(seed) {
+        FloatArray(barCount) { i ->
+            val h1 = sin(i * 0.55f + (seed and 0xFF) * 0.1f) * 0.32f
+            val h2 = sin(i * 1.35f + ((seed shr 8) and 0xFF) * 0.17f) * 0.22f
+            val envelope = sin((i.toFloat() / (barCount - 1)) * Math.PI).toFloat() * 0.25f + 0.75f
+            ((0.46f + h1 + h2) * envelope).coerceIn(0.20f, 0.96f)
+        }
+    }
+    val tick = rememberProgressTick(playing, hz = 20)
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (!seekable) Modifier else Modifier.pointerSeek(onSeek))
+            .semantics { contentDescription = "Song position" },
+    ) {
+        @Suppress("UNUSED_EXPRESSION") tick
+        val p = progress().coerceIn(0f, 1f)
+        val timeSec = if (playing) (System.nanoTime() / 1_000_000_000.0).toFloat() else 0f
+        val gap = 2.5.dp.toPx()
+        val totalGap = gap * (barCount - 1)
+        val barWidth = ((size.width - totalGap) / barCount).coerceAtLeast(2.dp.toPx())
+        val maxBarH = if (emphasized) size.height * 0.92f else size.height * 0.78f
+        val centerY = size.height / 2f
+        val playheadIndex = (p * (barCount - 1)).toInt()
+
+        for (i in 0 until barCount) {
+            val frac = i.toFloat() / (barCount - 1)
+            val ripple = if (playing) {
+                (sin(timeSec * 5.2f + i * 0.45f) * 0.14f + sin(timeSec * 8.3f - i * 0.7f) * 0.08f)
+            } else 0f
+            val isPlayhead = !live && i == playheadIndex
+            val hFraction = (baseHeights[i] + ripple + if (isPlayhead) 0.18f else 0f).coerceIn(0.18f, 1f)
+            val barH = (maxBarH * hFraction).coerceAtLeast(4.dp.toPx())
+            val x = i * (barWidth + gap)
+            val color = when {
+                live -> {
+                    val wave = if (playing) (sin(timeSec * 3.6f - i * 0.28f) * 0.25f + 0.75f) else 0.75f
+                    activeColor.copy(alpha = wave.coerceIn(0.45f, 1f))
+                }
+                isPlayhead -> activeColor
+                frac <= p -> activeColor.copy(alpha = 0.90f)
+                else -> inactiveColor
+            }
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, centerY - barH / 2f),
+                size = Size(barWidth, barH),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f),
+            )
+        }
+    }
+}
+
+/** Theme 3: Glowing neon laser bar with a pulsing orb playhead. */
+@Composable
+private fun NeonProgress(
+    progress: () -> Float,
+    playing: Boolean,
+    seekable: Boolean,
+    emphasized: Boolean,
+    onSeek: (Float) -> Unit,
+) {
+    val colors = PodiumTheme.colors
+    val tone = LocalAlbumTone.current
+    val neon = if (colors.isTonal) tone.accent else colors.highlight
+    val trackBg = colors.labelTertiary.copy(alpha = 0.25f)
+    val tick = rememberProgressTick(playing, hz = 16)
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (!seekable) Modifier else Modifier.pointerSeek(onSeek))
+            .semantics { contentDescription = "Song position" },
+    ) {
+        @Suppress("UNUSED_EXPRESSION") tick
+        val p = progress().coerceIn(0f, 1f)
+        val cy = size.height / 2f
+        val px = p * size.width
+        val coreH = if (emphasized) 4.dp.toPx() else 3.dp.toPx()
+        // Track background
+        drawRoundRect(trackBg, Offset(0f, cy - coreH / 2f), Size(size.width, coreH), CornerRadius(coreH))
+        // Outer & inner neon glow
+        drawRoundRect(neon.copy(alpha = 0.22f), Offset(0f, cy - coreH * 2.2f), Size(px, coreH * 4.4f), CornerRadius(coreH * 2.2f))
+        drawRoundRect(neon.copy(alpha = 0.48f), Offset(0f, cy - coreH * 1.2f), Size(px, coreH * 2.4f), CornerRadius(coreH * 1.2f))
+        drawRoundRect(neon, Offset(0f, cy - coreH / 2f), Size(px, coreH), CornerRadius(coreH))
+        // Glowing orb playhead
+        val pulse = if (playing) (sin((System.nanoTime() / 1_000_000_000.0) * 5.0).toFloat() * 0.15f + 1f) else 1f
+        val r = (if (emphasized) 7.dp.toPx() else 5.5.dp.toPx()) * pulse
+        drawCircle(neon.copy(alpha = 0.30f), radius = r * 2.1f, center = Offset(px.coerceIn(r, size.width - r), cy))
+        drawCircle(neon, radius = r, center = Offset(px.coerceIn(r, size.width - r), cy))
+        drawCircle(Color.White.copy(alpha = 0.85f), radius = r * 0.42f, center = Offset(px.coerceIn(r, size.width - r), cy))
+    }
+}
+
+/** Theme 4: Retro iPod / LCD segmented blocks inside a classic framed capsule. */
+@Composable
+private fun RetroProgress(
+    progress: () -> Float,
+    seekable: Boolean,
+    emphasized: Boolean,
+    onSeek: (Float) -> Unit,
+) {
+    val colors = PodiumTheme.colors
+    val tone = LocalAlbumTone.current
+    val fill = if (colors.isTonal) tone.accent else colors.labelPrimary
+    val empty = colors.labelTertiary.copy(alpha = 0.22f)
+    val borderCol = colors.labelSecondary.copy(alpha = 0.55f)
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (!seekable) Modifier else Modifier.pointerSeek(onSeek))
+            .semantics { contentDescription = "Song position" },
+    ) {
+        val p = progress().coerceIn(0f, 1f)
+        val boxH = if (emphasized) 14.dp.toPx() else 12.dp.toPx()
+        val top = (size.height - boxH) / 2f
+        val cr = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+        drawRoundRect(borderCol, Offset(0f, top), Size(size.width, boxH), cr, style = Stroke(1.2.dp.toPx()))
+        val pad = 3.dp.toPx()
+        val innerW = size.width - pad * 2
+        val innerH = boxH - pad * 2
+        val segments = 24
+        val gap = 2.dp.toPx()
+        val segW = (innerW - gap * (segments - 1)) / segments
+        val litCount = (p * segments).toInt()
+        for (i in 0 until segments) {
+            val x = pad + i * (segW + gap)
+            drawRoundRect(
+                color = if (i <= litCount && p > 0f) fill else empty,
+                topLeft = Offset(x, top + pad),
+                size = Size(segW, innerH),
+                cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+            )
+        }
+    }
+}
+
+/** Theme 5: Nothing OS-inspired dotted matrix track. */
+@Composable
+private fun DotsProgress(
+    progress: () -> Float,
+    playing: Boolean,
+    seekable: Boolean,
+    emphasized: Boolean,
+    onSeek: (Float) -> Unit,
+) {
+    val colors = PodiumTheme.colors
+    val tone = LocalAlbumTone.current
+    val active = if (colors.isTonal) tone.accent else colors.labelPrimary
+    val inactive = colors.labelTertiary.copy(alpha = 0.30f)
+    val tick = rememberProgressTick(playing, hz = 12)
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (!seekable) Modifier else Modifier.pointerSeek(onSeek))
+            .semantics { contentDescription = "Song position" },
+    ) {
+        @Suppress("UNUSED_EXPRESSION") tick
+        val p = progress().coerceIn(0f, 1f)
+        val dots = 30
+        val cy = size.height / 2f
+        val step = size.width / (dots - 1)
+        val playheadIdx = (p * (dots - 1)).toInt()
+        for (i in 0 until dots) {
+            val cx = i * step
+            val isHead = i == playheadIdx
+            val r = when {
+                isHead -> if (emphasized) 5.5.dp.toPx() else 4.5.dp.toPx()
+                i < playheadIdx -> 2.4.dp.toPx()
+                else -> 1.8.dp.toPx()
+            }
+            val col = if (i <= playheadIdx) active else inactive
+            if (isHead) {
+                drawCircle(active.copy(alpha = 0.28f), radius = r * 1.8f, center = Offset(cx, cy))
+            }
+            drawCircle(col, radius = r, center = Offset(cx, cy))
+        }
+    }
+}
+
+/** Theme 6: Analog radio tuner scale with major/minor ticks and a glowing tuner needle. */
+@Composable
+private fun TunerProgress(
+    progress: () -> Float,
+    seekable: Boolean,
+    emphasized: Boolean,
+    onSeek: (Float) -> Unit,
+) {
+    val colors = PodiumTheme.colors
+    val tickMajor = colors.labelSecondary.copy(alpha = 0.70f)
+    val tickMinor = colors.labelTertiary.copy(alpha = 0.38f)
+    val needle = Color(0xFFFF5238)
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (!seekable) Modifier else Modifier.pointerSeek(onSeek))
+            .semantics { contentDescription = "Song position" },
+    ) {
+        val p = progress().coerceIn(0f, 1f)
+        val cy = size.height / 2f
+        val ticks = 40
+        val step = size.width / ticks
+        // Center baseline
+        drawLine(tickMinor, Offset(0f, cy), Offset(size.width, cy), 1.dp.toPx())
+        for (i in 0..ticks) {
+            val x = i * step
+            val major = i % 5 == 0
+            val halfH = if (major) 6.dp.toPx() else 3.dp.toPx()
+            drawLine(
+                color = if (major) tickMajor else tickMinor,
+                start = Offset(x, cy - halfH),
+                end = Offset(x, cy + halfH),
+                strokeWidth = if (major) 1.4.dp.toPx() else 1.dp.toPx(),
+            )
+        }
+        val nx = (p * size.width).coerceIn(2.dp.toPx(), size.width - 2.dp.toPx())
+        val nh = if (emphasized) 12.dp.toPx() else 10.dp.toPx()
+        drawRoundRect(
+            color = needle.copy(alpha = 0.30f),
+            topLeft = Offset(nx - 3.dp.toPx(), cy - nh),
+            size = Size(6.dp.toPx(), nh * 2),
+            cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
+        )
+        drawRoundRect(
+            color = needle,
+            topLeft = Offset(nx - 1.3.dp.toPx(), cy - nh),
+            size = Size(2.6.dp.toPx(), nh * 2),
+            cornerRadius = CornerRadius(1.3.dp.toPx(), 1.3.dp.toPx()),
+        )
     }
 }
 
@@ -347,18 +654,10 @@ private fun NowPlayingTimes(p: NowPlayingParts) {
  */
 @Composable
 internal fun NowPlayingTransport(p: NowPlayingParts, modifier: Modifier = Modifier, compact: Boolean = false) {
-    val controller = p.controller
-    val controls = p.snapshot.controls
-    val height = if (compact) 48.dp else 56.dp
     val orb = if (compact) OrbCompact else OrbDiameter
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
-        // The group's own proportions, narrowed to fit a slim column (landscape) — never clipped.
-        val scale = ((maxWidth - KeyGap * 2) / (SideKeyWidth * 2 + orb)).coerceAtMost(1f)
-        Row(horizontalArrangement = Arrangement.spacedBy(KeyGap), verticalAlignment = Alignment.CenterVertically) {
-            TransportKey(PodiumSymbol.Previous, "Previous track", controls.previous, leading = true, SideKeyWidth * scale, height, p.touched, controller::previous)
-            OrbKey(p, orb * scale)
-            TransportKey(PodiumSymbol.Next, "Next track", controls.next, leading = false, SideKeyWidth * scale, height, p.touched, controller::next)
-        }
+        val scale = (maxWidth / orb).coerceAtMost(1f)
+        OrbKey(p, orb * scale)
     }
 }
 
@@ -573,8 +872,8 @@ internal fun QualityChip(text: String) {
                     style = Stroke(1.dp.toPx()),
                 )
             }
-            .padding(horizontal = 9.dp, vertical = 4.dp),
+            .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        PodiumText(text, PodiumTheme.type.caption, colors.labelPrimary, maxLines = 2)
+        PodiumText(text, PodiumTheme.type.footnote.copy(fontSize = 11.sp, lineHeight = 14.sp), colors.labelPrimary, maxLines = 1)
     }
 }

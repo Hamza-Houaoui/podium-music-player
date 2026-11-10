@@ -13,20 +13,25 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -57,6 +62,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import app.podium.core.designsystem.artwork.ArtworkLayers
+import app.podium.core.designsystem.artwork.rememberArtworkState
 import app.podium.core.designsystem.component.pressFeedback
 import app.podium.core.designsystem.glass.GlassMaterial
 import app.podium.core.designsystem.glass.glass
@@ -180,6 +188,7 @@ private fun DrawScope.drawDisplaySeam(corner: Dp) {
  * (full screen, D-85) in one, and where the music is heard (D-52), the play state and the battery
  * (full screen) sharing another, a hairline between them. No background — content fades out beneath it.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ScreenHeader(
     title: String,
@@ -196,6 +205,12 @@ fun ScreenHeader(
     clock: Boolean = false,
     /** Full screen (D-85): the phone's battery, beside the play state; null shows nothing. */
     battery: BatteryLevel? = null,
+    /** Active song's title shown under the battery pill when outside Now Playing. */
+    nowPlayingTitle: String? = null,
+    /** Active song's artwork shown beside the clock pill, same size as the clock housing. */
+    nowPlayingArtworkUri: String? = null,
+    /** Opens Now Playing when the header's song artwork or title pill is tapped. */
+    onOpenNowPlaying: (() -> Unit)? = null,
 ) {
     val haptics = rememberPodiumHaptics()
     val colors = PodiumTheme.colors
@@ -203,6 +218,57 @@ fun ScreenHeader(
     val motion = PodiumTheme.motion
     val ink = colors.labelPrimary
     val status = buildList {
+        if (nowPlayingTitle != null) {
+            add(
+                StatusItem("pic", housing = -1, fullBleed = true) {
+                    val art = rememberArtworkState(nowPlayingArtworkUri, 50.dp)
+                    val shape = if (colors.style == DisplayStyle.INDUSTRIAL) RoundedCornerShape(4.dp) else RoundedCornerShape(percent = 50)
+                    Box(
+                        Modifier
+                            .size(width = 50.dp, height = Spacing.housing)
+                            .clip(shape)
+                            .drawWithContent {
+                                drawContent()
+                                val r = if (colors.style == DisplayStyle.INDUSTRIAL) 4.dp.toPx() else size.height / 2f
+                                val rim = when (colors.style) {
+                                    DisplayStyle.TONAL -> Brush.verticalGradient(
+                                        0f to Color.White.copy(alpha = 0.22f),
+                                        0.45f to Color.White.copy(alpha = 0.04f),
+                                        1f to Color.Black.copy(alpha = 0.35f),
+                                    )
+                                    DisplayStyle.GLASS -> Brush.linearGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = if (colors.isDark) 0.5f else 0.9f),
+                                            Color.Transparent,
+                                            Color.White.copy(alpha = 0.16f),
+                                        ),
+                                        start = Offset.Zero,
+                                        end = Offset(size.width, size.height),
+                                    )
+                                    DisplayStyle.INDUSTRIAL -> Brush.verticalGradient(listOf(colors.separator, colors.separator))
+                                }
+                                drawRoundRect(rim, cornerRadius = CornerRadius(r, r), style = Stroke(1.5.dp.toPx()))
+                            }
+                            .then(
+                                if (onOpenNowPlaying == null) Modifier else Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    haptics.navigate(forward = true)
+                                    onOpenNowPlaying()
+                                },
+                            )
+                            .semantics {
+                                role = Role.Button
+                                contentDescription = "Now playing $nowPlayingTitle"
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        ArtworkLayers(art, nowPlayingTitle)
+                    }
+                },
+            )
+        }
         if (clock) add(StatusItem("time", housing = 0) { TitleBarClock(ink, Modifier.padding(horizontal = 2.dp)) })
         if (output != null) {
             add(
@@ -246,56 +312,95 @@ fun ScreenHeader(
         }
         if (battery != null) add(StatusItem("battery", housing = 1) { TitleBarBattery(battery, ink) })
     }
-    Row(
-        // Every housing sits the edge margin from the display's top and sides (D-103).
-        modifier.fillMaxWidth().height(ScreenHeaderHeight).padding(start = Spacing.edge - BackKeyOverhang, end = Spacing.edge),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (canGoBack) {
+    val songNameItems = buildList {
+        if (nowPlayingTitle != null) {
+            add(
+                StatusItem("songName", housing = 0) {
+                    PodiumText(
+                        nowPlayingTitle,
+                        type.caption.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                        ink,
+                        Modifier
+                            .widthIn(max = 124.dp)
+                            .then(if (motion.reduced) Modifier else Modifier.basicMarquee(initialDelayMillis = 1_500, repeatDelayMillis = 2_000))
+                            .then(
+                                if (onOpenNowPlaying == null) Modifier else Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    haptics.navigate(forward = true)
+                                    onOpenNowPlaying()
+                                },
+                            ),
+                        maxLines = 1,
+                    )
+                },
+            )
+        }
+    }
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            // Every housing sits the edge margin from the display's top and sides (D-103).
+            Modifier.fillMaxWidth().height(ScreenHeaderHeight).padding(start = Spacing.edge - BackKeyOverhang, end = Spacing.edge),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (canGoBack) {
+                Box(
+                    Modifier
+                        .size(BackKeyTouch)
+                        .pressFeedback(0.86f)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                            haptics.navigate(forward = false)
+                            onBack()
+                        }
+                        .semantics {
+                            role = Role.Button
+                            contentDescription = "Back"
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(Modifier.size(Spacing.housing).backKeyHousing(), contentAlignment = Alignment.Center) {
+                        Symbol(PodiumSymbol.ChevronLeft, ink, size = 21.dp, weight = 700)
+                    }
+                }
+                // The title keeps the edge margin from the back key, as the key keeps it from the edge.
+                Spacer(Modifier.width(Spacing.edge - BackKeyOverhang))
+            } else {
+                Spacer(Modifier.width(BackKeyOverhang))
+            }
+            // The title travels with the paper (D-29): forward slides it in from the right, back from the left.
+            AnimatedContent(
+                targetState = title to depth,
+                transitionSpec = {
+                    if (motion.reduced) {
+                        fadeIn(motion.fadeFast()) togetherWith fadeOut(motion.fadeFast())
+                    } else {
+                        // SPATIAL (D-65): the title travels on its column's own curve, so the two never drift apart.
+                        val dir = if (targetState.second >= initialState.second) 1 else -1
+                        (slideInHorizontally(motion.spatial()) { dir * it / 2 } + fadeIn(motion.fadeStandard())) togetherWith
+                            (slideOutHorizontally(motion.spatial()) { -dir * it / 2 } + fadeOut(motion.fadeFast()))
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                contentAlignment = Alignment.CenterStart,
+                label = "headerTitle",
+            ) { (shown, _) ->
+                PodiumText(shown, type.title, colors.labelPrimary, Modifier.semantics { heading() }, maxLines = 1)
+            }
+            Spacer(Modifier.width(Spacing.edge))
+            StatusPills(status, Modifier.testTag(StatusTestTag))
+        }
+        if (songNameItems.isNotEmpty()) {
             Box(
                 Modifier
-                    .size(BackKeyTouch)
-                    .pressFeedback(0.86f)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        haptics.navigate(forward = false)
-                        onBack()
-                    }
-                    .semantics {
-                        role = Role.Button
-                        contentDescription = "Back"
-                    },
-                contentAlignment = Alignment.Center,
+                    .fillMaxWidth()
+                    .offset(y = (-7).dp)
+                    .padding(end = Spacing.edge),
+                contentAlignment = Alignment.CenterEnd,
             ) {
-                Box(Modifier.size(Spacing.housing).backKeyHousing(), contentAlignment = Alignment.Center) {
-                    Symbol(PodiumSymbol.ChevronLeft, ink, size = 21.dp, weight = 700)
-                }
+                StatusPills(songNameItems, height = 20.dp)
             }
-            // The title keeps the edge margin from the back key, as the key keeps it from the edge.
-            Spacer(Modifier.width(Spacing.edge - BackKeyOverhang))
-        } else {
-            Spacer(Modifier.width(BackKeyOverhang))
         }
-        // The title travels with the paper (D-29): forward slides it in from the right, back from the left.
-        AnimatedContent(
-            targetState = title to depth,
-            transitionSpec = {
-                if (motion.reduced) {
-                    fadeIn(motion.fadeFast()) togetherWith fadeOut(motion.fadeFast())
-                } else {
-                    // SPATIAL (D-65): the title travels on its column's own curve, so the two never drift apart.
-                    val dir = if (targetState.second >= initialState.second) 1 else -1
-                    (slideInHorizontally(motion.spatial()) { dir * it / 2 } + fadeIn(motion.fadeStandard())) togetherWith
-                        (slideOutHorizontally(motion.spatial()) { -dir * it / 2 } + fadeOut(motion.fadeFast()))
-                }
-            },
-            modifier = Modifier.weight(1f),
-            contentAlignment = Alignment.CenterStart,
-            label = "headerTitle",
-        ) { (shown, _) ->
-            PodiumText(shown, type.title, colors.labelPrimary, Modifier.semantics { heading() }, maxLines = 1)
-        }
-        Spacer(Modifier.width(Spacing.edge))
-        StatusPills(status, Modifier.testTag(StatusTestTag))
     }
 }
 

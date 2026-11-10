@@ -2,11 +2,17 @@ package app.podium.core.designsystem.component
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
@@ -15,12 +21,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -31,12 +40,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import app.podium.core.designsystem.artwork.ArtworkImage
 import app.podium.core.designsystem.symbol.PodiumSymbol
@@ -66,6 +79,7 @@ fun <T> CoverFlowStage(
     artworkOf: (T) -> String?,
     onActivate: (T, Int) -> Unit,
     onLongPress: ((T, Int) -> Unit)? = null,
+    isPlayingItem: ((T) -> Boolean)? = null,
     emptySymbol: PodiumSymbol = PodiumSymbol.Album,
     emptyTitle: String = "Nothing here yet",
     emptyMessage: String = "",
@@ -187,6 +201,15 @@ fun <T> CoverFlowStage(
                         .semantics { contentDescription = if (sub.isNotBlank()) "$title by $sub" else title },
                 ) {
                     ArtworkImage(art, cover, fallbackText = title, modifier = Modifier.fillMaxSize())
+                    if (isPlayingItem?.invoke(item) == true) {
+                        CoverFlowPlayingBadge(
+                            accent = Color(0xFF4CD964),
+                            reduced = motion.reduced,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 10.dp),
+                        )
+                    }
                 }
             }
         }
@@ -215,6 +238,68 @@ fun <T> CoverFlowStage(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CoverFlowPlayingBadge(
+    accent: Color,
+    reduced: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val transition = rememberInfiniteTransition(label = "coverFlowPlaying")
+    val bars = if (reduced) {
+        listOf(0.7f, 0.45f, 0.85f)
+    } else {
+        listOf(
+            transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(460, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+                label = "bar0",
+            ).value,
+            transition.animateFloat(
+                initialValue = 0.95f,
+                targetValue = 0.3f,
+                animationSpec = infiniteRepeatable(tween(380, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+                label = "bar1",
+            ).value,
+            transition.animateFloat(
+                initialValue = 0.35f,
+                targetValue = 0.9f,
+                animationSpec = infiniteRepeatable(tween(520, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+                label = "bar2",
+            ).value,
+        )
+    }
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.Black.copy(alpha = 0.72f))
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(
+            modifier = Modifier.height(11.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            bars.forEach { frac ->
+                Box(
+                    Modifier
+                        .width(2.5.dp)
+                        .height((11f * frac).dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(accent),
+                )
+            }
+        }
+        PodiumText(
+            text = "Playing",
+            style = PodiumTheme.type.footnote.copy(fontWeight = FontWeight.SemiBold),
+            color = Color.White,
+        )
     }
 }
 

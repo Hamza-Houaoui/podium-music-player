@@ -84,7 +84,7 @@ class AppGraph(val context: Context) {
     )
 
     val libraryStore = LibraryStore(database)
-    val catalog = TrackCatalog(registry) { id -> libraryStore.track(id) }
+    val catalog = TrackCatalog(registry) { id -> libraryStore.track(id) ?: downloads.findTrack(id) }
 
     /** A song with its album's and artists' pages, looked up on its source when a list left them out (D-79, D-80). */
     val songPages = SongPages(catalog, registry, appScope)
@@ -190,7 +190,7 @@ class AppGraph(val context: Context) {
     val onlineService = AppOnlineServiceSettings(this)
 
     /** The heart on Now Playing: routed to local favorites or ONLINE's liked songs by the song's environment. */
-    val favorites = EnvironmentFavorites(localFavorites, online, environments, { catalog.cached(it) ?: libraryStore.track(it) }, appScope)
+    val favorites = EnvironmentFavorites(localFavorites, online, environments, { catalog.cached(it) ?: libraryStore.track(it) ?: downloads.findTrack(it) }, appScope)
 
     val recommendations = SourceRecommendationEngine(registry, equivalence::exactEquivalents)
 

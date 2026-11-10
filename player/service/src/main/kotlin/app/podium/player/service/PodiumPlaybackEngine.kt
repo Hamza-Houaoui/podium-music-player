@@ -365,7 +365,11 @@ class PodiumPlaybackEngine(
                     val serving = registered + custom
                     val state = queue.state.value
                     state.items
-                        .filter { it.uid != state.current?.uid && it.selection?.servedBy?.let { s -> s !in serving } == true }
+                        .filter {
+                            it.uid != state.current?.uid &&
+                                it.selection?.path != app.podium.sources.api.ResolutionPath.OWNED_COPY &&
+                                it.selection?.servedBy?.let { s -> s !in serving } == true
+                        }
                         .forEach { queue.unpin(it.uid) }
                     // A custom source added or turned on (D-92): the songs about to play may be there.
                     if (!knownCustom.containsAll(custom)) {
@@ -390,7 +394,9 @@ class PodiumPlaybackEngine(
      */
     private fun considerUpgrade(uid: QueueUid, outcome: ResolveOutcome.Resolved) {
         val item = queue.item(uid) ?: return
-        if (outcome.selection.path == app.podium.sources.api.ResolutionPath.PREFERRED_SOURCE) return
+        if (outcome.selection.path == app.podium.sources.api.ResolutionPath.PREFERRED_SOURCE ||
+            outcome.selection.path == app.podium.sources.api.ResolutionPath.OWNED_COPY
+        ) return
         if (item.track.kind == app.podium.core.model.MediaKind.LIVE) return
         if (item.fallbackPolicy != app.podium.sources.api.resolve.FallbackPolicy.EXACT_ONLY) return
         val environment = deps.registry.get(item.track.source.sourceId)?.descriptor?.environment ?: return
@@ -721,9 +727,10 @@ class PodiumPlaybackEngine(
     private fun startResolve(uid: QueueUid): Deferred<ResolveOutcome> {
         inFlight[uid]?.let { if (it.isActive) return it }
         val item = queue.item(uid)
-        if (item?.selection != null && item.selection!!.isUsableAt(deps.clock.nowMillis())) {
+        if (item?.selection?.path == app.podium.sources.api.ResolutionPath.OWNED_COPY &&
+            item.selection!!.isUsableAt(deps.clock.nowMillis())
+        ) {
             val reused = ResolveOutcome.Resolved(item.selection!!, reused = true, attempts = emptyList())
-            considerUpgrade(uid, reused)
             return CompletableDeferred(reused)
         }
         val deferred = CompletableDeferred<ResolveOutcome>()
@@ -751,7 +758,9 @@ class PodiumPlaybackEngine(
      * resolution (started on the main thread) if needed. Never resolves on this thread itself.
      */
     internal fun resolveForLoader(uid: QueueUid): Selection {
-        queue.item(uid)?.selection?.takeIf { it.isUsableAt(deps.clock.nowMillis()) }?.let { return it }
+        queue.item(uid)?.selection
+            ?.takeIf { it.path == app.podium.sources.api.ResolutionPath.OWNED_COPY && it.isUsableAt(deps.clock.nowMillis()) }
+            ?.let { return it }
         val started = CompletableDeferred<Deferred<ResolveOutcome>>()
         scope.launch { started.complete(startResolve(uid)) }
         val outcome = runBlocking {
@@ -839,6 +848,25 @@ class PodiumPlaybackEngine(
             }
         }
         val current = queue.state.value.current
+        // If a remote stream failed due to network loss, unpin and re-resolve once so any offline
+        // owned copy on disk can take over immediately.
+        val isNetworkError = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+        if (isNetworkError && current != null &&
+            current.selection?.path != app.podium.sources.api.ResolutionPath.OWNED_COPY &&
+            refreshedAfterError.add(current.uid)
+        ) {
+            val pos = player.currentPosition
+            queue.unpin(current.uid)
+            scope.launch {
+                val outcome = runCatching { itemResolver.resolve(current.uid, Purpose.PLAYBACK) }.getOrNull()
+                if (outcome is ResolveOutcome.Resolved && outcome.selection.path == app.podium.sources.api.ResolutionPath.OWNED_COPY) {
+                    matchStreamKind(current.uid, outcome.selection)
+                    player.seekTo(player.currentMediaItemIndex, pos)
+                    player.prepare()
+                }
+            }
+        }
         val refused = PlaybackErrors.isRefusedStream(error) && current?.selection?.media != null
         // A stream URL that's refused (expired after a long pause, revoked) is asked for afresh from
         // the same source, once, and playback carries on where it was (D-18: same source, same copy).

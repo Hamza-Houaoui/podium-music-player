@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Size
 import androidx.core.content.ContextCompat
@@ -111,6 +112,7 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
     /** Which folders are read (D-32), kept with the source's own settings. */
     private val prefs = appContext.getSharedPreferences("local_source", Context.MODE_PRIVATE)
     private val edits = ConcurrentHashMap<String, LocalTrackEdit>()
+    private val externalTracks = ConcurrentHashMap<String, Track>()
     @Volatile
     private var lastRows: List<MediaStoreRow> = emptyList()
     private val _selection = MutableStateFlow(loadSelection())
@@ -473,7 +475,8 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
         }
 
         override suspend fun track(ref: SourceRef): Outcome<Track> =
-            currentTracks().firstOrNull { it.source.providerKey == ref.providerKey }?.let { Outcome.Success(it) }
+            externalTracks[ref.providerKey]?.let { Outcome.Success(it) }
+                ?: currentTracks().firstOrNull { it.source.providerKey == ref.providerKey }?.let { Outcome.Success(it) }
                 ?: Outcome.Failure(PodiumError.NotFound(ref.providerKey))
 
         override suspend fun album(id: AlbumId): Outcome<AlbumDetail> {
@@ -489,10 +492,93 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
         }
     }
 
+    /**
+     * Resolves an audio `content://` or `file://` URI opened from a file manager or another app
+     * into a playable [Track], reading embedded tags & duration without requiring MediaStore.
+     */
+    suspend fun resolveExternalUri(uri: Uri): Track? = withContext(Dispatchers.IO) {
+        val uriString = uri.toString()
+        val key = "ext:${uriString.hashCode().toUInt().toString(16)}"
+        val displayName = runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
+        val fallbackTitle = displayName?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: "Audio file"
+
+        var title: String? = null
+        var artist: String? = null
+        var albumTitle: String? = null
+        var durationMs: Long? = null
+        var bitrateBps: Int? = null
+        val mimeType = runCatching { resolver.getType(uri) }.getOrNull()
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(appContext, uri)
+            title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }
+            artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.takeIf { it.isNotBlank() }
+            albumTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.takeIf { it.isNotBlank() }
+            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.takeIf { it > 0 }
+            bitrateBps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()?.takeIf { it > 0 }
+        } catch (_: Throwable) {
+            // Even if metadata fails, ExoPlayer can often still decode the file directly.
+        } finally {
+            runCatching { retriever.release() }
+        }
+
+        val resolvedArtist = artist ?: "Unknown artist"
+        val resolvedTitle = title ?: fallbackTitle
+        val canRead = runCatching {
+            resolver.openFileDescriptor(uri, "r")?.use { true } ?: false
+        }.getOrDefault(false) || (uri.scheme == "file" && uri.path?.let { File(it).canRead() } == true)
+        if (!canRead) return@withContext null
+
+        val track = Track(
+            id = TrackId.of(LocalTrackMapper.SOURCE_ID, key),
+            source = SourceRef(LocalTrackMapper.SOURCE_ID, key, providerUri = uriString),
+            title = resolvedTitle,
+            artists = listOf(ArtistCredit(resolvedArtist, id = ArtistId.of(LocalTrackMapper.SOURCE_ID, "ext:${resolvedArtist.lowercase()}"))),
+            artistDisplay = resolvedArtist,
+            album = albumTitle?.let { AlbumRef(it, AlbumId.of(LocalTrackMapper.SOURCE_ID, "ext:${it.lowercase()}"), resolvedArtist) },
+            durationMs = durationMs,
+            artwork = ArtworkRef(LocalTrackMapper.SOURCE_ID, "ext/$key"),
+            advertisedQualities = listOfNotNull(LocalTrackMapper.claimedQuality(mimeType, bitrateBps)),
+            availability = app.podium.core.model.Availability.Playable,
+            routes = setOf(PlaybackRoute.DIRECT),
+        )
+        externalTracks[key] = track
+        track
+    }
+
     override val playback: PlaybackFacet = object : PlaybackFacet {
         override val routes = setOf(PlaybackRoute.DIRECT)
 
         override suspend fun resolve(track: Track, quality: QualityRequest, purpose: Purpose): FacetResolution {
+            val externalUri = track.source.providerUri?.takeIf {
+                track.source.providerKey.startsWith("ext:") || it.startsWith("content://") || it.startsWith("file://")
+            }
+            if (externalUri != null) {
+                val parsed = Uri.parse(externalUri)
+                val exists = withContext(Dispatchers.IO) {
+                    runCatching { resolver.openFileDescriptor(parsed, "r")?.use { true } ?: false }.getOrDefault(false) ||
+                        (parsed.scheme == "file" && parsed.path?.let { File(it).canRead() } == true)
+                }
+                if (!exists) return FacetResolution.Miss(MissReason.NOT_FOUND)
+                return FacetResolution.Resolved(
+                    PlaybackTarget.DirectStream(
+                        track.id,
+                        PlayableMedia(
+                            uri = externalUri,
+                            mimeType = track.advertisedQualities.firstOrNull()?.container,
+                            claimedQuality = track.advertisedQualities.firstOrNull(),
+                            durationMs = track.durationMs,
+                            sourceId = descriptor.id,
+                            cacheKey = "${track.id.value}|ext",
+                        ),
+                    ),
+                )
+            }
             if (!hasPermission()) return FacetResolution.Miss(MissReason.NOT_PERMITTED)
             val id = track.source.providerKey.toLongOrNull() ?: return FacetResolution.Miss(MissReason.NOT_FOUND)
             val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
@@ -518,6 +604,20 @@ class LocalMusicSource(context: Context, private val scope: CoroutineScope) : Mu
 
     override val artwork: ArtworkFacet = object : ArtworkFacet {
         override suspend fun load(ref: ArtworkRef, sizePx: Int): ArtworkPayload? = withContext(Dispatchers.IO) {
+            if (ref.key.startsWith("ext/")) {
+                val key = ref.key.removePrefix("ext/")
+                val track = externalTracks[key] ?: return@withContext null
+                val uriStr = track.source.providerUri ?: return@withContext null
+                val safeKey = key.replace(':', '_')
+                val file = File(artDir, "$safeKey-$sizePx.jpg")
+                if (file.exists()) return@withContext ArtworkPayload.LocalFile(file.absolutePath)
+                val uri = Uri.parse(uriStr)
+                val bitmap = embeddedPicture(uri, sizePx) ?: loadThumbnail(uri, sizePx) ?: return@withContext null
+                artDir.mkdirs()
+                FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                bitmap.recycle()
+                return@withContext ArtworkPayload.LocalFile(file.absolutePath)
+            }
             val (albumId, audioId) = LocalTrackMapper.parseArtworkKey(ref.key) ?: return@withContext null
             val file = File(artDir, "album-$albumId-$sizePx.jpg")
             if (file.exists()) return@withContext ArtworkPayload.LocalFile(file.absolutePath)

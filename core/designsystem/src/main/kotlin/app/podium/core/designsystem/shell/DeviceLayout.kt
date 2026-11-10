@@ -50,7 +50,11 @@ fun DeviceLayout(
     val insets = if (immersive) WindowInsets.displayCutout else WindowInsets.systemBars.union(WindowInsets.displayCutout)
     BoxWithConstraints(modifier.windowInsetsPadding(insets)) {
         val diameter = (maxWidth * 0.58f).coerceIn(216.dp, 300.dp).coerceAtMost(maxHeight * 0.31f)
-        Column(Modifier.fillMaxSize().padding(top = Spacing.s), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = Spacing.m)) {
+                Accessory(!keyboardOpen, Modifier.align(Alignment.CenterStart).padding(start = Spacing.xs)) { indicators() }
+                Accessory(!keyboardOpen, Modifier.align(Alignment.CenterEnd)) { powerButton() }
+            }
             BoxWithConstraints(
                 Modifier.weight(1f).fillMaxWidth().padding(horizontal = Spacing.m),
                 contentAlignment = Alignment.Center,
@@ -60,8 +64,6 @@ fun DeviceLayout(
             }
             Box(Modifier.fillMaxWidth().padding(vertical = WheelGap)) {
                 Box(Modifier.align(Alignment.Center)) { wheel(diameter) }
-                Accessory(!keyboardOpen, Modifier.align(Alignment.TopEnd).padding(end = Spacing.s)) { powerButton() }
-                Accessory(!keyboardOpen, Modifier.align(Alignment.BottomStart).padding(start = Spacing.m)) { indicators() }
             }
         }
     }
@@ -78,9 +80,9 @@ private fun Accessory(visible: Boolean, modifier: Modifier, content: @Composable
     ) { content() }
 }
 
-private val WheelGap = 18.dp
+private val WheelGap = 12.dp
 private const val PORTRAIT_MIN = 0.60f
-private const val PORTRAIT_MAX = 0.82f
+private const val PORTRAIT_MAX = 0.88f
 
 /** The largest width × height inside [maxW] × [maxH] whose width:height lies in [min]..[max]. */
 internal fun fitProportion(maxW: Dp, maxH: Dp, min: Float, max: Float): Pair<Dp, Dp> {

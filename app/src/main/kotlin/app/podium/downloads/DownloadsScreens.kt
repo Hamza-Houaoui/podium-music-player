@@ -289,6 +289,8 @@ fun DownloadsCoverFlowScreen(
     onOpenNowPlaying: () -> Unit,
 ) {
     val completed by downloads.completedTracks.collectAsStateWithLifecycle()
+    val snapshot by controller.snapshot.collectAsStateWithLifecycle()
+    val playingId = if (snapshot.intent == app.podium.player.api.PlayIntent.PLAY) snapshot.item?.trackId else null
     val overlay = LocalOverlayHost.current
     app.podium.core.designsystem.component.CoverFlowStage(
         items = completed,
@@ -297,6 +299,7 @@ fun DownloadsCoverFlowScreen(
         titleOf = { it.title },
         subtitleOf = { listOfNotNull(it.artistDisplay.takeIf { a -> a.isNotBlank() }, it.album?.title).joinToString(" · ") },
         artworkOf = { it.artwork?.uri },
+        isPlayingItem = { track -> playingId != null && track.id == playingId },
         onActivate = { _, index ->
             if (completed.isNotEmpty()) {
                 catalog.remember(completed)

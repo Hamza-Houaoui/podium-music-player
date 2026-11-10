@@ -66,6 +66,7 @@ data class DownloadEntry(
     val addedAt: Long = System.currentTimeMillis(),
     val smart: Boolean = false,
     val claimedKbps: Int? = null,
+    val mimeType: String? = null,
     val error: String? = null,
 )
 
@@ -138,7 +139,14 @@ class OfflineDownloadManager(
     }
 
     fun isDownloaded(trackId: TrackId): Boolean =
-        _entries.value[trackId]?.status == DownloadStatus.COMPLETED && audioFileFor(trackId).exists()
+        _entries.value[trackId]?.status == DownloadStatus.COMPLETED && isValidAudioFile(audioFileFor(trackId))
+
+    fun findTrack(trackId: TrackId): Track? {
+        val entry = _entries.value[trackId] ?: return null
+        if (entry.status != DownloadStatus.COMPLETED) return null
+        if (!isValidAudioFile(audioFileFor(trackId))) return null
+        return entry.track
+    }
 
     fun isDownloading(trackId: TrackId): Boolean {
         val st = _entries.value[trackId]?.status
@@ -149,10 +157,12 @@ class OfflineDownloadManager(
         val entry = _entries.value[track.id] ?: return null
         if (entry.status != DownloadStatus.COMPLETED) return null
         val file = audioFileFor(track.id)
-        if (!file.exists() || file.length() <= 0L) return null
+        if (!isValidAudioFile(file)) return null
+        val mime = detectAudioMimeType(file, entry.mimeType)
         val quality = entry.claimedKbps?.takeIf { it > 0 }?.let { AudioQuality(bitrateKbps = it) }
         return entry.track to PlayableMedia(
-            uri = file.toURI().toString(),
+            uri = android.net.Uri.fromFile(file).toString(),
+            mimeType = mime,
             sourceId = track.source.sourceId,
             claimedQuality = quality,
             cacheKey = "${track.id.value}|offline",
@@ -171,7 +181,7 @@ class OfflineDownloadManager(
         if (track.kind == MediaKind.LIVE || track.source.sourceId.value == "radio") return
         val existing = _entries.value[track.id]
         if (existing != null && (existing.status == DownloadStatus.COMPLETED || existing.status == DownloadStatus.DOWNLOADING || existing.status == DownloadStatus.QUEUED)) {
-            if (existing.status == DownloadStatus.COMPLETED && audioFileFor(track.id).exists()) return
+            if (existing.status == DownloadStatus.COMPLETED && isValidAudioFile(audioFileFor(track.id))) return
             if (existing.status != DownloadStatus.COMPLETED) return
         }
         graph.catalog.remember(listOf(track))
@@ -262,8 +272,9 @@ class OfflineDownloadManager(
                     )
                 },
             )
-            if (!tmpFile.exists() || tmpFile.length() <= 0L) {
-                throw IllegalStateException("Downloaded audio file is empty")
+            if (!isValidAudioFile(tmpFile)) {
+                tmpFile.delete()
+                throw IllegalStateException("Downloaded audio file is empty or corrupt")
             }
             if (finalFile.exists()) finalFile.delete()
             if (!tmpFile.renameTo(finalFile)) {
@@ -309,11 +320,13 @@ class OfflineDownloadManager(
             }
 
             // 5. Mark completed & persist
+            val detectedMime = detectAudioMimeType(finalFile, media.mimeType)
             val completed = initial.copy(
                 status = DownloadStatus.COMPLETED,
                 progress = 100,
                 bytes = finalFile.length(),
                 claimedKbps = media.claimedQuality?.bitrateKbps,
+                mimeType = detectedMime,
                 error = null,
             )
             graph.catalog.remember(listOf(track))
@@ -341,6 +354,13 @@ class OfflineDownloadManager(
         dest: File,
         onProgress: (percent: Int, bytesRead: Long) -> Unit,
     ) {
+        val expectedFromUrl = url.substringAfter('?', "")
+            .split('&')
+            .firstOrNull { it.startsWith("clen=") }
+            ?.substringAfter('=')
+            ?.toLongOrNull()
+            ?.takeIf { it > 0L }
+
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -350,12 +370,15 @@ class OfflineDownloadManager(
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Android)")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                if ("Range" !in headers) {
+                    setRequestProperty("Range", "bytes=0-")
+                }
             }
             val code = conn.responseCode
             if (code !in 200..299) {
                 throw IllegalStateException("HTTP $code")
             }
-            val totalBytes = conn.contentLengthLong
+            val totalBytes = conn.contentLengthLong.takeIf { it > 0L } ?: expectedFromUrl ?: -1L
             var downloaded = 0L
             var lastReportedPct = -1
             conn.inputStream.use { input ->
@@ -379,9 +402,102 @@ class OfflineDownloadManager(
                     output.flush()
                 }
             }
+            // If YouTube CDN closed the first open-ended connection early before reaching totalBytes,
+            // resume downloading the remaining range(s).
+            var retries = 0
+            while (totalBytes > 0L && downloaded in 1 until totalBytes && retries < 8) {
+                conn?.disconnect()
+                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 15_000
+                    readTimeout = 20_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Android)")
+                    headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                    setRequestProperty("Range", "bytes=$downloaded-")
+                }
+                if (conn.responseCode != 206) break
+                var chunkRead = 0L
+                conn.inputStream.use { input ->
+                    FileOutputStream(dest, /* append = */ true).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            chunkRead += read
+                            val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(5, 95)
+                            if (pct != lastReportedPct) {
+                                lastReportedPct = pct
+                                onProgress(pct, downloaded)
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+                if (chunkRead <= 0L) retries++ else retries = 0
+            }
         } finally {
             conn?.disconnect()
         }
+    }
+
+    private fun isValidAudioFile(file: File): Boolean {
+        if (!file.exists() || file.length() < 8 * 1024L) return false
+        return runCatching {
+            val head = ByteArray(16)
+            val read = file.inputStream().use { it.read(head) }
+            if (read < 8) return false
+            val textPrefix = String(head, 0, read, Charsets.ISO_8859_1).trimStart()
+            if (textPrefix.startsWith("#EXTM3U", ignoreCase = true) ||
+                textPrefix.startsWith("<!DOCTYPE", ignoreCase = true) ||
+                textPrefix.startsWith("<html", ignoreCase = true) ||
+                textPrefix.startsWith("<?xml", ignoreCase = true) ||
+                textPrefix.startsWith("{")
+            ) {
+                return false
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun detectAudioMimeType(file: File, fallback: String?): String? {
+        runCatching {
+            val head = ByteArray(16)
+            val read = file.inputStream().use { it.read(head) }
+            if (read >= 12) {
+                // EBML / WebM / Matroska: 0x1A 0x45 0xDF 0xA3
+                if (head[0] == 0x1A.toByte() && head[1] == 0x45.toByte() && head[2] == 0xDF.toByte() && head[3] == 0xA3.toByte()) {
+                    return "audio/webm"
+                }
+                // ISO BMFF / MP4 / M4A: "ftyp" at offset 4..7
+                if (head[4] == 'f'.code.toByte() && head[5] == 't'.code.toByte() && head[6] == 'y'.code.toByte() && head[7] == 'p'.code.toByte()) {
+                    return "audio/mp4"
+                }
+                // Ogg: "OggS"
+                if (head[0] == 'O'.code.toByte() && head[1] == 'g'.code.toByte() && head[2] == 'g'.code.toByte() && head[3] == 'S'.code.toByte()) {
+                    return "audio/ogg"
+                }
+                // FLAC: "fLaC"
+                if (head[0] == 'f'.code.toByte() && head[1] == 'L'.code.toByte() && head[2] == 'a'.code.toByte() && head[3] == 'C'.code.toByte()) {
+                    return "audio/flac"
+                }
+                // WAV: "RIFF"...."WAVE"
+                if (head[0] == 'R'.code.toByte() && head[1] == 'I'.code.toByte() && head[2] == 'F'.code.toByte() && head[3] == 'F'.code.toByte() &&
+                    head[8] == 'W'.code.toByte() && head[9] == 'A'.code.toByte() && head[10] == 'V'.code.toByte() && head[11] == 'E'.code.toByte()
+                ) {
+                    return "audio/wav"
+                }
+                // MP3 ID3 tag ("ID3") or MPEG frame sync (0xFF 0xE0..0xFF)
+                if ((head[0] == 'I'.code.toByte() && head[1] == 'D'.code.toByte() && head[2] == '3'.code.toByte()) ||
+                    (head[0] == 0xFF.toByte() && (head[1].toInt() and 0xE0) == 0xE0)
+                ) {
+                    return "audio/mpeg"
+                }
+            }
+        }
+        return fallback?.takeIf { it.startsWith("audio/") }
     }
 
     private fun observeSmartDownloads() {
@@ -455,13 +571,19 @@ class OfflineDownloadManager(
             val entry = decodeEntry(obj) ?: continue
             val file = audioFileFor(entry.track.id)
             val resolvedStatus = when (entry.status) {
-                DownloadStatus.COMPLETED -> if (file.exists() && file.length() > 0L) DownloadStatus.COMPLETED else DownloadStatus.FAILED
+                DownloadStatus.COMPLETED -> if (isValidAudioFile(file)) DownloadStatus.COMPLETED else DownloadStatus.FAILED
                 DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED -> DownloadStatus.FAILED
                 DownloadStatus.FAILED -> DownloadStatus.FAILED
+            }
+            val resolvedMime = if (resolvedStatus == DownloadStatus.COMPLETED) {
+                detectAudioMimeType(file, entry.mimeType)
+            } else {
+                entry.mimeType
             }
             map[entry.track.id] = entry.copy(
                 status = resolvedStatus,
                 progress = if (resolvedStatus == DownloadStatus.COMPLETED) 100 else 0,
+                mimeType = resolvedMime,
             )
         }
         map
@@ -507,6 +629,7 @@ class OfflineDownloadManager(
             put("addedAt", entry.addedAt)
             put("smart", entry.smart)
             entry.claimedKbps?.let { put("claimedKbps", it) }
+            entry.mimeType?.let { put("mimeType", it) }
             entry.error?.let { put("error", it) }
         }
     }
@@ -570,6 +693,7 @@ class OfflineDownloadManager(
             addedAt = obj.optLong("addedAt", 0L),
             smart = obj.optBoolean("smart", false),
             claimedKbps = if (obj.has("claimedKbps")) obj.optInt("claimedKbps") else null,
+            mimeType = obj.optString("mimeType").takeIf { it.isNotBlank() },
             error = obj.optString("error").takeIf { it.isNotBlank() },
         )
     }.getOrNull()
