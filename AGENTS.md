@@ -1,5 +1,10 @@
 # AGENTS.md — Podium
 
+> **Looking for an exact screen, button, colour or animation? Read [`AI_GUIDE.md`](AI_GUIDE.md)
+> first.** It is the element-level map (file + composable/symbol for every screen, row, tray
+> action, colour token and motion token). This file is the architecture index; `docs/` is the
+> long-form source of truth.
+
 > Read this file before changing anything. It is the fast onboarding map for an AI agent that has
 > never seen this repository. Deeper material lives in `docs/` (see §15); `docs/` is the source of
 > truth for behaviour, this file is the index to it.

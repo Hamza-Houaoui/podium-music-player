@@ -1,5 +1,9 @@
 # Podium — project rules for coding agents
 
+**Start with [`AI_GUIDE.md`](AI_GUIDE.md)** for the element-level map: every screen, row, button,
+tray action, colour token and motion token with its exact file and composable/symbol. Then use this
+file for rules and `docs/README.md` for long-form detail.
+
 Read `docs/README.md` first. The docs are the source of truth; update them in the same commit as behaviour changes. Record significant decisions in `docs/decision-log.md` (ADR in `docs/adr/` if major).
 
 ## Non-negotiables
